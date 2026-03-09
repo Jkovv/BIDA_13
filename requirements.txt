@@ -1,0 +1,6 @@
+pyspark
+numpy
+pandas
+xgboost
+scikit-learn
+duckdb>=1.0.0

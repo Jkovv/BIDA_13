@@ -1,0 +1,6 @@
+services:
+  bdp:
+    image: bdp
+    build:
+      context: .
+      dockerfile: ./Dockerfile
