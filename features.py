@@ -10,18 +10,21 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.ml.feature import HashingTF, IDF, Tokenizer
 
-
 PROCESSED_DIR = "/app/processed"
 
-
 def run_duckdb_features(input_dir=PROCESSED_DIR):
+    """Phase 1: Fast SQL-based joins and simple feature extraction."""
     con = duckdb.connect()
 
-    con.execute(f"CREATE TABLE movies AS SELECT * FROM read_parquet('{input_dir}/train.parquet')")
+    # Load crew data produced by cleaning.py
     con.execute(f"CREATE TABLE directing AS SELECT * FROM read_parquet('{input_dir}/directing.parquet')")
     con.execute(f"CREATE TABLE writing AS SELECT * FROM read_parquet('{input_dir}/writing.parquet')")
-    con.execute("DELETE FROM directing WHERE director_id = '\\N'")
+    
+    # Pre-clean crew tables for joins
+    con.execute("DELETE FROM directing WHERE director_id = '\\N' OR director_id IS NULL")
+    con.execute("DELETE FROM writing WHERE writer_id = '\\N' OR writer_id IS NULL")
 
+    # Star-schema aggregation: calculating crew sizes per movie
     con.execute("""
         CREATE TABLE crew_counts AS
         SELECT
@@ -35,13 +38,15 @@ def run_duckdb_features(input_dir=PROCESSED_DIR):
         ON d.tconst = w.tconst
     """)
 
+    # Apply joins to all data splits (reusability)
     for src, dst in [("train.parquet", "train_feat.parquet"),
                       ("validation.parquet", "validation_feat.parquet"),
                       ("test.parquet", "test_feat.parquet")]:
         path = os.path.join(input_dir, src)
         if not os.path.exists(path):
             continue
-        tbl = src.replace(".parquet", "").replace(".", "_")
+            
+        tbl = src.replace(".parquet", "")
         con.execute(f"""
             CREATE OR REPLACE TABLE {tbl} AS
             SELECT s.*,
@@ -55,113 +60,89 @@ def run_duckdb_features(input_dir=PROCESSED_DIR):
             FROM read_parquet('{path}') s
             LEFT JOIN crew_counts c ON s.tconst = c.tconst
         """)
+        
         out = os.path.join(input_dir, dst)
         con.execute(f"COPY {tbl} TO '{out}' (FORMAT PARQUET)")
-        n = con.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
-        print(f"  {dst}: {n} rows")
+        print(f"  Generated DuckDB features for {dst}")
 
     con.close()
 
-
 def run_spark_features(input_dir=PROCESSED_DIR):
+    """Phase 2: Complex distributed transformations (TF-IDF, Leave-one-out)."""
     spark = SparkSession.builder \
-        .appName("IMDB-Features") \
+        .appName("IMDB-Features-Spark") \
         .config("spark.sql.adaptive.enabled", "true") \
         .getOrCreate()
 
+    # Load DuckDB outputs
     movies = spark.read.parquet(os.path.join(input_dir, "train_feat.parquet"))
-    directing = spark.read.parquet(os.path.join(input_dir, "directing.parquet"))
-    writing = spark.read.parquet(os.path.join(input_dir, "writing.parquet"))
-    directing = directing.filter(F.col("director_id") != "\\N")
+    directing = spark.read.parquet(os.path.join(input_dir, "directing.parquet")).filter(F.col("director_id") != "\\N")
+    writing = spark.read.parquet(os.path.join(input_dir, "writing.parquet")).filter(F.col("writer_id") != "\\N")
 
+    # Broadcast labels for success rate calculation
     labels = movies.select("tconst", "label").filter(F.col("label").isNotNull())
-
-    # director success: broadcast labels (small table, avoids shuffle)
-    dir_lab = directing.join(
-        F.broadcast(labels), directing.tconst == labels.tconst, "inner"
-    ).select(directing.tconst, directing.director_id, labels.label)
-
+    
+    # --- Director Success (Leave-One-Out) ---
+    dir_lab = directing.join(F.broadcast(labels), "tconst", "inner")
     dir_stats = dir_lab.groupBy("director_id").agg(
         F.sum(F.col("label").cast("int")).alias("dir_success"),
-        F.count("*").alias("dir_movies"),
+        F.count("*").alias("dir_movies")
     )
     dir_feat = dir_lab.join(dir_stats, "director_id") \
-        .withColumn("dir_loo",
-            (F.col("dir_success") - F.col("label").cast("int")) /
-            F.greatest(F.col("dir_movies") - 1, F.lit(1)))
+        .withColumn("dir_loo", (F.col("dir_success") - F.col("label").cast("int")) / 
+                    F.greatest(F.col("dir_movies") - 1, F.lit(1)))
+    dir_movie = dir_feat.groupBy("tconst").agg(F.avg("dir_loo").alias("director_avg_success"),
+                                              F.max("dir_movies").alias("director_max_experience"))
 
-    dir_movie = dir_feat.groupBy("tconst").agg(
-        F.avg("dir_loo").alias("director_avg_success"),
-        F.max("dir_movies").alias("director_max_experience"),
-    )
-
-    # writer success
-    wrt_lab = writing.join(
-        F.broadcast(labels), writing.tconst == labels.tconst, "inner"
-    ).select(writing.tconst, writing.writer_id, labels.label)
-
+    # --- Writer Success (Leave-One-Out) ---
+    wrt_lab = writing.join(F.broadcast(labels), "tconst", "inner")
     wrt_stats = wrt_lab.groupBy("writer_id").agg(
         F.sum(F.col("label").cast("int")).alias("wrt_success"),
-        F.count("*").alias("wrt_movies"),
+        F.count("*").alias("wrt_movies")
     )
     wrt_feat = wrt_lab.join(wrt_stats, "writer_id") \
-        .withColumn("wrt_loo",
-            (F.col("wrt_success") - F.col("label").cast("int")) /
-            F.greatest(F.col("wrt_movies") - 1, F.lit(1)))
+        .withColumn("wrt_loo", (F.col("wrt_success") - F.col("label").cast("int")) / 
+                    F.greatest(F.col("wrt_movies") - 1, F.lit(1)))
+    wrt_movie = wrt_feat.groupBy("tconst").agg(F.avg("wrt_loo").alias("writer_avg_success"),
+                                              F.max("wrt_movies").alias("writer_max_experience"))
 
-    wrt_movie = wrt_feat.groupBy("tconst").agg(
-        F.avg("wrt_loo").alias("writer_avg_success"),
-        F.max("wrt_movies").alias("writer_max_experience"),
-    )
-
-    # TF-IDF on titles
+    # --- TF-IDF on Titles ---
     tokenizer = Tokenizer(inputCol="primaryTitle", outputCol="title_tokens")
     hashing = HashingTF(inputCol="title_tokens", outputCol="title_tf", numFeatures=100)
     idf = IDF(inputCol="title_tf", outputCol="title_tfidf")
 
-    train_tfidf = idf.fit(hashing.transform(tokenizer.transform(movies))).transform(
-        hashing.transform(tokenizer.transform(movies))
-    )
-
-    # save the idf model reference for val/test
-    idf_model = idf.fit(hashing.transform(tokenizer.transform(movies)))
+    # Fit only on training data to avoid leakage
+    train_tokenized = tokenizer.transform(movies)
+    train_hashed = hashing.transform(train_tokenized)
+    idf_model = idf.fit(train_hashed)
+    train_tfidf = idf_model.transform(train_hashed)
 
     defaults = {"director_avg_success": 0.5, "director_max_experience": 0,
                 "writer_avg_success": 0.5, "writer_max_experience": 0}
 
-    train_final = train_tfidf \
-        .join(dir_movie, "tconst", "left") \
-        .join(wrt_movie, "tconst", "left") \
-        .fillna(defaults) \
-        .drop("title_tokens", "title_tf", "primaryTitle_raw")
-
+    # Save Train Final
+    train_final = train_tfidf.join(dir_movie, "tconst", "left").join(wrt_movie, "tconst", "left").fillna(defaults)
     train_final.write.mode("overwrite").parquet(os.path.join(input_dir, "train_final.parquet"))
-    print(f"  train_final: {train_final.count()} rows")
 
+    # Apply to Validation and Test
     for split in ["validation", "test"]:
         feat_path = os.path.join(input_dir, f"{split}_feat.parquet")
-        if not os.path.exists(feat_path):
-            continue
+        if not os.path.exists(feat_path): continue
+        
         df = spark.read.parquet(feat_path)
-        df = idf_model.transform(hashing.transform(tokenizer.transform(df)))
-        df = df.join(dir_movie, "tconst", "left") \
-               .join(wrt_movie, "tconst", "left") \
-               .fillna(defaults) \
-               .drop("title_tokens", "title_tf")
-        out = os.path.join(input_dir, f"{split}_final.parquet")
-        df.write.mode("overwrite").parquet(out)
-        print(f"  {split}_final: {df.count()} rows")
+        df_tfidf = idf_model.transform(hashing.transform(tokenizer.transform(df)))
+        df_final = df_tfidf.join(dir_movie, "tconst", "left").join(wrt_movie, "tconst", "left").fillna(defaults)
+        
+        df_final.write.mode("overwrite").parquet(os.path.join(input_dir, f"{split}_final.parquet"))
+        print(f"  Finished {split}_final.parquet")
 
     spark.stop()
 
-
 def run(input_dir=PROCESSED_DIR):
-    print("Phase 1: DuckDB features")
+    print("Starting Feature Engineering...")
     run_duckdb_features(input_dir)
-    print("\nPhase 2: PySpark features")
     run_spark_features(input_dir)
-    print("\nFeature engineering done")
-
+    print("Feature Engineering completed successfully.")
 
 if __name__ == "__main__":
     run()
