@@ -1,6 +1,9 @@
-pyspark
-numpy
+duckdb
 pandas
+numpy
 xgboost
+catboost
+lightgbm
 scikit-learn
-duckdb>=1.0.0
+pyspark
+optuna
