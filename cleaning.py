@@ -17,9 +17,7 @@ def run(data_dir=DATA_DIR, output_dir=OUTPUT_DIR):
     con = duckdb.connect()
     con.create_function("strip_diacritics", strip_diacritics, ['VARCHAR'], 'VARCHAR')
 
-    print("Step 1: Loading disaggregated project data...")
     con.execute(f"CREATE TABLE movies_raw AS SELECT * FROM read_csv_auto('{data_dir}/train-*.csv', header=true)")
-    
     for split in ["validation_hidden", "test_hidden"]:
         path = os.path.join(data_dir, f"{split}.csv")
         if os.path.exists(path):
@@ -36,7 +34,6 @@ def run(data_dir=DATA_DIR, output_dir=OUTPUT_DIR):
                 con.execute(f"CREATE TABLE {table} AS SELECT * FROM {table}_view WHERE person_id != '\\N'")
                 con.execute(f"COPY {table} TO '{output_dir}/{table}.parquet' (FORMAT PARQUET)")
 
-    print("Step 2: Normalization and Temporal Imputation...")
     for src, dst, has_label in [("movies_raw", "movies_clean", True), 
                                 ("validation_hidden_raw", "validation_clean", False),
                                 ("test_hidden_raw", "test_clean", False)]:
