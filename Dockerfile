@@ -18,9 +18,10 @@ COPY requirements.txt .
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
 COPY . /app
+RUN mkdir -p /app/processed /app/output
 
 RUN adduser -u 5678 --disabled-password --gecos "" appuser && \
     chown -R appuser /app
 USER appuser
 
-CMD ["python", "cleaning.py"]
+CMD ["sh", "-c", "python cleaning.py && python features.py && python run.py"]

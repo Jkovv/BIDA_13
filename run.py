@@ -1,160 +1,89 @@
-import argparse
-import os
-import numpy as np
-import pandas as pd
-import optuna
-
-import xgboost as xgb
-from sklearn.ensemble import RandomForestClassifier
-from lightgbm import LGBMClassifier
-from catboost import CatBoostClassifier
-
+import os, json, joblib, numpy as np, pandas as pd, optuna
+from xgboost import XGBClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from pyspark.sql import SparkSession
 
+DATA_DIR = "/app/imdb"
 PROCESSED_DIR = "/app/processed"
 OUTPUT_DIR = "/app/output"
+SEED = 42 
 
-FEATURE_COLS = [
-    "year", "decade", "movie_age", "numVotes_imputed", "log_numVotes", 
-    "runtimeMinutes_winsorised", "votes_per_minute", "n_directors", 
-    "n_writers", "crew_size", "is_multi_director", "is_foreign", 
-    "is_title_corrupted", "title_length", "title_word_count",
-    "director_avg_success", "director_max_experience",
-    "writer_avg_success", "writer_max_experience",
-]
-
-def prepare_dataset(df, is_train=True):
-    if "title_tfidf" in df.columns:
-        tfidf_data = np.array(df["title_tfidf"].apply(lambda x: x.toArray()).tolist())
-        tfidf_df = pd.DataFrame(tfidf_data, columns=[f"tfidf_{i}" for i in range(tfidf_data.shape[1])])
-        df = pd.concat([df.reset_index(drop=True), tfidf_df], axis=1)
-
-    model_ready_cols = [c for c in df.columns if c in FEATURE_COLS or c.startswith("tfidf_")]
+def prepare(df, smoothing_m, is_train=True):
+    tfidf = np.array(df["tfidf"].apply(lambda x: x.toArray()).tolist())
+    X_tfidf = pd.DataFrame(tfidf, columns=[f"f{i}" for i in range(tfidf.shape[1])])
     
-    for col in model_ready_cols:
-        if df[col].dtype == bool:
-            df[col] = df[col].astype(int)
+    cols = ["year", "log_votes", "runtime_filled", "is_foreign", "title_len", "vote_density"]
+    for pfx in ["dir", "wrt"]:
+        col = f"{pfx}_score_m{smoothing_m}"
+        if col in df.columns: cols.append(col)
             
-    X = df[model_ready_cols].fillna(0).values
-    y = df["label"].astype(int).values if is_train and "label" in df.columns else None
-    
+    X_num = df[cols].copy()
+    for col in X_num.columns:
+        if X_num[col].dtype in ['bool', 'object']: 
+            X_num[col] = X_num[col].fillna(0).astype(int)
+        else: 
+            X_num[col] = pd.to_numeric(X_num[col], errors='coerce').fillna(0)
+            
+    X = pd.concat([X_num.reset_index(drop=True), X_tfidf], axis=1)
+    y = df["label"].astype(int).values if is_train else None
     return X, y
 
-def get_tuning_objective(model_name, X, y):
-    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
-
-    def objective(trial):
-        if model_name == "xgboost":
-            params = {
-                "n_estimators": trial.suggest_int("n_estimators", 200, 800),
-                "max_depth": trial.suggest_int("max_depth", 2, 3), # Force extremely shallow trees
-                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.05, log=True),
-                "min_child_weight": trial.suggest_int("min_child_weight", 20, 60), # Huge leaves
-                "reg_lambda": trial.suggest_float("reg_lambda", 100.0, 500.0), # Extreme L2 penalty
-                "subsample": trial.suggest_float("subsample", 0.4, 0.6),
-                "colsample_bytree": trial.suggest_float("colsample_bytree", 0.3, 0.5), # Feature dropout
-                "random_state": 42, "eval_metric": "logloss", "n_jobs": -1
-            }
-            model = xgb.XGBClassifier(**params)
-            model.fit(X_train, y_train, eval_set=[(X_val, y_val)], early_stopping_rounds=30, verbose=False)
-        
-        elif model_name == "lightgbm":
-            params = {
-                "n_estimators": trial.suggest_int("n_estimators", 200, 800),
-                "num_leaves": trial.suggest_int("num_leaves", 5, 15),
-                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.05, log=True),
-                "lambda_l2": trial.suggest_float("lambda_l2", 100.0, 500.0),
-                "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 50, 150),
-                "random_state": 42, "n_jobs": -1, "verbosity": -1
-            }
-            model = LGBMClassifier(**params)
-            model.fit(X_train, y_train, eval_set=[(X_val, y_val)], callbacks=[xgb.callback.EarlyStopping(stopping_rounds=30)])
-
-        elif model_name == "catboost":
-            params = {
-                "iterations": trial.suggest_int("iterations", 400, 1000),
-                "depth": trial.suggest_int("depth", 2, 4),
-                "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 10.0, 80.0),
-                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.05, log=True),
-                "random_seed": 42, "verbose": False, "early_stopping_rounds": 40
-            }
-            model = CatBoostClassifier(**params)
-            model.fit(X_train, y_train, eval_set=(X_val, y_val))
-        
-        else: # RF
-            params = {
-                "n_estimators": 300, "max_depth": 6, "min_samples_leaf": 80, 
-                "random_state": 42, "n_jobs": -1
-            }
-            model = RandomForestClassifier(**params)
-            model.fit(X_train, y_train)
-
-        return accuracy_score(y_val, model.predict(X_val))
-
-    return objective
-
-def run_benchmark(tune=False):
-    spark = SparkSession.builder.appName("IMDB-Final-Benchmark").getOrCreate()
+def run_benchmark():
+    spark = SparkSession.builder.appName("IMDB-Final-Evaluation").getOrCreate()
+    train_pd = spark.read.parquet(f"{PROCESSED_DIR}/train_final.parquet").toPandas()
     
-    print("\n[INFO] Loading feature-engineered data...")
-    train_df = spark.read.parquet(os.path.join(PROCESSED_DIR, "train_final.parquet")).toPandas()
-    X, y = prepare_dataset(train_df, is_train=True)
+    print("\n--- Phase 1: Local Gap Analysis & Parameter Tuning ---")
+    best_m, best_val, best_params = 15, 0, {}
     
-    X_train, X_holdout, y_train, y_holdout = train_test_split(X, y, test_size=0.15, random_state=42)
+    for m in [5, 15, 30]:
+        X_all, y_all = prepare(train_pd, m)
+        X_tr, X_ho, y_tr, y_ho = train_test_split(X_all, y_all, test_size=0.15, random_state=SEED)
+        
+        study = optuna.create_study(direction="maximize")
+        def obj(t):
+            model = XGBClassifier(
+                n_estimators=t.suggest_int("n_estimators", 400, 700), 
+                max_depth=t.suggest_int("max_depth", 3, 5), 
+                learning_rate=0.02,
+                random_state=SEED
+            )
+            model.fit(X_tr, y_tr)
+            return accuracy_score(y_ho, model.predict(X_ho))
+        study.optimize(obj, n_trials=5)
+        
+        if study.best_value > best_val:
+            best_m, best_val, best_params = m, study.best_value, study.best_params
 
-    factories = {
-        "catboost": lambda p: CatBoostClassifier(**p, verbose=False),
-        "xgboost": lambda p: xgb.XGBClassifier(**p, eval_metric="logloss"),
-        "lightgbm": lambda p: LGBMClassifier(**p, verbosity=-1),
-        "random_forest": lambda p: RandomForestClassifier(**p)
-    }
+    X_fin, y_fin = prepare(train_pd, best_m)
+    X_t, X_v, y_t, y_v = train_test_split(X_fin, y_fin, test_size=0.15, random_state=SEED)
+    temp_model = XGBClassifier(**best_params, learning_rate=0.02, random_state=SEED)
+    temp_model.fit(X_t, y_t)
+    
+    train_acc = accuracy_score(y_t, temp_model.predict(X_t))
+    val_acc = accuracy_score(y_v, temp_model.predict(X_v))
+    
+    print(f"Local Train Acc: {train_acc:.4f}")
+    print(f"Local Val Acc: {val_acc:.4f} (Holdout Gap: {train_acc - val_acc:.4f})")
 
-    stats = []
-    best_clf, best_acc = None, 0
-
-    print(f"\n[INFO] Starting benchmarking (Tune={tune})...")
-    for name in factories.keys():
-        if tune:
-            print(f" >> Tuning {name}...")
-            study = optuna.create_study(direction="maximize")
-            study.optimize(get_tuning_objective(name, X_train, y_train), n_trials=15)
-            params = study.best_params
-        else:
-            params = {"random_state": 42, "max_depth": 3 if name != "random_forest" else 6}
-
-        if name == "catboost" and "random_state" in params:
-            params["random_seed"] = params.pop("random_state")
-
-        clf = factories[name](params)
-        clf.fit(X_train, y_train)
-
-        tr_score = accuracy_score(y_train, clf.predict(X_train))
-        ho_score = accuracy_score(y_holdout, clf.predict(X_holdout))
-        print(f" >> {name.upper():15} | Train: {tr_score:.4f} | Holdout: {ho_score:.4f}")
-
-        stats.append({"model": name, "train": tr_score, "holdout": ho_score})
-        if ho_score > best_acc:
-            best_acc, best_clf = ho_score, clf
-
-    print("\n" + "="*40 + "\n FINAL RESULTS \n" + "="*40)
-    print(pd.DataFrame(stats).sort_values("holdout", ascending=False).to_string(index=False))
-    print("="*40)
+    print("\n--- Phase 3: Final Training on 100% of Signal ---")
+    final_model = XGBClassifier(**best_params, learning_rate=0.02, random_state=SEED)
+    final_model.fit(X_fin, y_fin)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    for split, parquet_name in [("validation", "validation_final.parquet"), ("test", "test_final.parquet")]:
-        path = os.path.join(PROCESSED_DIR, parquet_name)
-        if os.path.exists(path):
-            pdf = spark.read.parquet(path).toPandas()
-            X_eval, _ = prepare_dataset(pdf, is_train=False)
-            preds = best_clf.predict(X_eval)
-            with open(os.path.join(OUTPUT_DIR, f"{split}.txt"), "w") as f:
+    joblib.dump(final_model, f"{OUTPUT_DIR}/best_model.pkl")
+
+    for split in ["validation", "test"]:
+        csv_path = f"{DATA_DIR}/{split}_hidden.csv"
+        if os.path.exists(csv_path):
+            order = pd.read_csv(csv_path)[['tconst']]
+            feat_pd = spark.read.parquet(f"{PROCESSED_DIR}/{split}_final.parquet").toPandas()
+            merged = order.merge(feat_pd, on='tconst', how='left')
+            X_ev, _ = prepare(merged, best_m, is_train=False)
+            preds = final_model.predict(X_ev)
+            with open(f"{OUTPUT_DIR}/{split}.txt", "w") as f:
                 for p in preds: f.write(f"{bool(p)}\n")
-    
     spark.stop()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--tune", action="store_true")
-    run_benchmark(tune=parser.parse_args().tune)
+    run_benchmark()

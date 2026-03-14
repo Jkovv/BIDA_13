@@ -1,9 +1,11 @@
 duckdb
 pandas
-numpy
-xgboost
-catboost
-lightgbm
-scikit-learn
+pyarrow
 pyspark
+numpy
+joblib
 optuna
+xgboost
+lightgbm
+catboost
+scikit-learn
