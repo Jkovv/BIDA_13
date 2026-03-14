@@ -4,22 +4,18 @@ import numpy as np
 import pandas as pd
 import optuna
 
-# Model Libraries
 import xgboost as xgb
 from sklearn.ensemble import RandomForestClassifier
 from lightgbm import LGBMClassifier
 from catboost import CatBoostClassifier
 
-# Frameworks
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from pyspark.sql import SparkSession
 
-# Paths
 PROCESSED_DIR = "/app/processed"
 OUTPUT_DIR = "/app/output"
 
-# Base Features
 FEATURE_COLS = [
     "year", "decade", "movie_age", "numVotes_imputed", "log_numVotes", 
     "runtimeMinutes_winsorised", "votes_per_minute", "n_directors", 
@@ -30,9 +26,6 @@ FEATURE_COLS = [
 ]
 
 def prepare_dataset(df, is_train=True):
-    """
-    Standardizes feature matrix and handles TF-IDF expansion.
-    """
     if "title_tfidf" in df.columns:
         tfidf_data = np.array(df["title_tfidf"].apply(lambda x: x.toArray()).tolist())
         tfidf_df = pd.DataFrame(tfidf_data, columns=[f"tfidf_{i}" for i in range(tfidf_data.shape[1])])
@@ -50,9 +43,6 @@ def prepare_dataset(df, is_train=True):
     return X, y
 
 def get_tuning_objective(model_name, X, y):
-    """
-    Search space logic with extreme regularization for XGBoost and LGBM.
-    """
     X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
 
     def objective(trial):
@@ -93,7 +83,7 @@ def get_tuning_objective(model_name, X, y):
             model = CatBoostClassifier(**params)
             model.fit(X_train, y_train, eval_set=(X_val, y_val))
         
-        else: # Random Forest
+        else: # RF
             params = {
                 "n_estimators": 300, "max_depth": 6, "min_samples_leaf": 80, 
                 "random_state": 42, "n_jobs": -1
@@ -112,7 +102,6 @@ def run_benchmark(tune=False):
     train_df = spark.read.parquet(os.path.join(PROCESSED_DIR, "train_final.parquet")).toPandas()
     X, y = prepare_dataset(train_df, is_train=True)
     
-    # Internal holdout check
     X_train, X_holdout, y_train, y_holdout = train_test_split(X, y, test_size=0.15, random_state=42)
 
     factories = {
@@ -153,7 +142,6 @@ def run_benchmark(tune=False):
     print(pd.DataFrame(stats).sort_values("holdout", ascending=False).to_string(index=False))
     print("="*40)
 
-    # Submission logic
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     for split, parquet_name in [("validation", "validation_final.parquet"), ("test", "test_final.parquet")]:
         path = os.path.join(PROCESSED_DIR, parquet_name)
