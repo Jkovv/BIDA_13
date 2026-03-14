@@ -1,6 +1,5 @@
 """
-features.py - builds all features in two phases.
-
+we divided this process into 2 phases:
 Phase 1 (DuckDB): crew count joins (star schema), temporal features, title stats.
 Phase 2 (PySpark): director/writer success rates with leave-one-out, TF-IDF.
 """
@@ -13,18 +12,16 @@ from pyspark.ml.feature import HashingTF, IDF, Tokenizer
 PROCESSED_DIR = "/app/processed"
 
 def run_duckdb_features(input_dir=PROCESSED_DIR):
-    """Phase 1: Fast SQL-based joins and simple feature extraction."""
     con = duckdb.connect()
 
-    # Load crew data produced by cleaning.py
     con.execute(f"CREATE TABLE directing AS SELECT * FROM read_parquet('{input_dir}/directing.parquet')")
     con.execute(f"CREATE TABLE writing AS SELECT * FROM read_parquet('{input_dir}/writing.parquet')")
     
-    # Pre-clean crew tables for joins
+    # pre-clean crew tables for joins
     con.execute("DELETE FROM directing WHERE director_id = '\\N' OR director_id IS NULL")
     con.execute("DELETE FROM writing WHERE writer_id = '\\N' OR writer_id IS NULL")
 
-    # Star-schema aggregation: calculating crew sizes per movie
+    # star-schema aggregation: calculating crew sizes per movie
     con.execute("""
         CREATE TABLE crew_counts AS
         SELECT
@@ -38,7 +35,7 @@ def run_duckdb_features(input_dir=PROCESSED_DIR):
         ON d.tconst = w.tconst
     """)
 
-    # Apply joins to all data splits (reusability)
+    # reusability
     for src, dst in [("train.parquet", "train_feat.parquet"),
                       ("validation.parquet", "validation_feat.parquet"),
                       ("test.parquet", "test_feat.parquet")]:
@@ -68,21 +65,17 @@ def run_duckdb_features(input_dir=PROCESSED_DIR):
     con.close()
 
 def run_spark_features(input_dir=PROCESSED_DIR):
-    """Phase 2: Complex distributed transformations (TF-IDF, Leave-one-out)."""
     spark = SparkSession.builder \
         .appName("IMDB-Features-Spark") \
         .config("spark.sql.adaptive.enabled", "true") \
         .getOrCreate()
 
-    # Load DuckDB outputs
     movies = spark.read.parquet(os.path.join(input_dir, "train_feat.parquet"))
     directing = spark.read.parquet(os.path.join(input_dir, "directing.parquet")).filter(F.col("director_id") != "\\N")
     writing = spark.read.parquet(os.path.join(input_dir, "writing.parquet")).filter(F.col("writer_id") != "\\N")
 
-    # Broadcast labels for success rate calculation
     labels = movies.select("tconst", "label").filter(F.col("label").isNotNull())
     
-    # --- Director Success (Leave-One-Out) ---
     dir_lab = directing.join(F.broadcast(labels), "tconst", "inner")
     dir_stats = dir_lab.groupBy("director_id").agg(
         F.sum(F.col("label").cast("int")).alias("dir_success"),
@@ -94,7 +87,6 @@ def run_spark_features(input_dir=PROCESSED_DIR):
     dir_movie = dir_feat.groupBy("tconst").agg(F.avg("dir_loo").alias("director_avg_success"),
                                               F.max("dir_movies").alias("director_max_experience"))
 
-    # --- Writer Success (Leave-One-Out) ---
     wrt_lab = writing.join(F.broadcast(labels), "tconst", "inner")
     wrt_stats = wrt_lab.groupBy("writer_id").agg(
         F.sum(F.col("label").cast("int")).alias("wrt_success"),
@@ -106,12 +98,11 @@ def run_spark_features(input_dir=PROCESSED_DIR):
     wrt_movie = wrt_feat.groupBy("tconst").agg(F.avg("wrt_loo").alias("writer_avg_success"),
                                               F.max("wrt_movies").alias("writer_max_experience"))
 
-    # --- TF-IDF on Titles ---
+    # TF-IDF on titles 
     tokenizer = Tokenizer(inputCol="primaryTitle", outputCol="title_tokens")
     hashing = HashingTF(inputCol="title_tokens", outputCol="title_tf", numFeatures=100)
     idf = IDF(inputCol="title_tf", outputCol="title_tfidf")
 
-    # Fit only on training data to avoid leakage
     train_tokenized = tokenizer.transform(movies)
     train_hashed = hashing.transform(train_tokenized)
     idf_model = idf.fit(train_hashed)
@@ -120,11 +111,9 @@ def run_spark_features(input_dir=PROCESSED_DIR):
     defaults = {"director_avg_success": 0.5, "director_max_experience": 0,
                 "writer_avg_success": 0.5, "writer_max_experience": 0}
 
-    # Save Train Final
     train_final = train_tfidf.join(dir_movie, "tconst", "left").join(wrt_movie, "tconst", "left").fillna(defaults)
     train_final.write.mode("overwrite").parquet(os.path.join(input_dir, "train_final.parquet"))
 
-    # Apply to Validation and Test
     for split in ["validation", "test"]:
         feat_path = os.path.join(input_dir, f"{split}_feat.parquet")
         if not os.path.exists(feat_path): continue
