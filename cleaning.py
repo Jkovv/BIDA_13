@@ -1,15 +1,11 @@
-"""
-cleaning.py - takes raw files and produces clean, imputed parquet datasets.
-"""
 import duckdb
 import unicodedata
 import json
 import os
 import pandas as pd
 
-DATA_DIR = "/app/imdb"             # raw csv/json files
-OUTPUT_DIR = "/app/processed"      # parquet checkpoints
-
+DATA_DIR = "/app/imdb"           
+OUTPUT_DIR = "/app/processed"      
 
 def strip_diacritics(text):
     if text is None:
@@ -37,14 +33,14 @@ def load_json_to_df(filepath, col1_name, col2_name, key1, key2):
     with open(filepath) as f:
         data = json.load(f)
     
-    # Case 1: List of objects like [{"movie": "x", "writer": "y"}, ...]
+    # case 1: list of objects 
     if isinstance(data, list):
         return pd.DataFrame({
             col1_name: [row.get(key1) for row in data],
             col2_name: [row.get(key2) for row in data]
         })
     
-    # Case 2: Dict with keys like {"movie": {...}, "writer": {...}}
+    # case 2: dict with keys
     if isinstance(data, dict):
         val1 = data.get(key1, {})
         val2 = data.get(key2, {})
@@ -87,7 +83,7 @@ def run(data_dir=DATA_DIR, output_dir=OUTPUT_DIR):
             """)
             print(f"  {con.execute(f'SELECT COUNT(*) FROM {split}_raw').fetchone()[0]} {split} rows")
 
-    # Load directing.json
+    # loading jsons
     df_directing = load_json_to_df(
         os.path.join(data_dir, "directing.json"),
         "tconst", "director_id", "movie", "director"
@@ -96,7 +92,6 @@ def run(data_dir=DATA_DIR, output_dir=OUTPUT_DIR):
     con.execute("CREATE TABLE directing AS SELECT * FROM directing_view")
     print(f"  {len(df_directing)} directing assignments")
 
-    # Load writing.json
     df_writing = load_json_to_df(
         os.path.join(data_dir, "writing.json"),
         "tconst", "writer_id", "movie", "writer"
@@ -218,7 +213,6 @@ def run(data_dir=DATA_DIR, output_dir=OUTPUT_DIR):
 
     con.close()
     print("Cleaning done")
-
 
 if __name__ == "__main__":
     run()
