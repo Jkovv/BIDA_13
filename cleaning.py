@@ -1,66 +1,54 @@
 import duckdb
-import unicodedata
-import json
 import os
-import pandas as pd
+import unicodedata
 
-DATA_DIR = "/app/imdb"           
-OUTPUT_DIR = "/app/processed"      
-
-def strip_diacritics(text):
+def clean_txt(text):
     if text is None: return None
-    nfkd = unicodedata.normalize('NFKD', str(text))
+    # Entity Resolution: lowercase, trim, and remove diacritics (Week 5)
+    nfkd = unicodedata.normalize('NFKD', str(text).lower().strip())
     return ''.join(c for c in nfkd if not unicodedata.combining(c))
 
-def run(data_dir=DATA_DIR, output_dir=OUTPUT_DIR):
-    os.makedirs(output_dir, exist_ok=True)
+def run():
     con = duckdb.connect()
-    con.create_function("strip_diacritics", strip_diacritics, ['VARCHAR'], 'VARCHAR')
+    con.create_function("clean_txt", clean_txt, ['VARCHAR'], 'VARCHAR')
 
-    con.execute(f"CREATE TABLE movies_raw AS SELECT * FROM read_csv_auto('{data_dir}/train-*.csv', header=true)")
+    # Load disaggregated CSV files
+    con.execute("CREATE TABLE raw AS SELECT * FROM read_csv_auto('/app/imdb/train-*.csv')")
+    
+    # Robust Centers (Week 5): Capping outliers (Winsorization) to mitigate synthetic errors
+    con.execute("""
+        CREATE TABLE clean_base AS SELECT DISTINCT
+            tconst, clean_txt(primaryTitle) as title_clean,
+            TRY_CAST(NULLIF(startYear, '\\N') AS INTEGER) as year,
+            LEAST(GREATEST(TRY_CAST(NULLIF(runtimeMinutes, '\\N') AS INTEGER), 1), 210) as runtime,
+            LEAST(numVotes, 400000) as votes,
+            label
+        FROM raw
+    """)
+
+    # Missing Value Imputation: Decade-based medians for quantitative cleaning
+    con.execute("""
+        CREATE TABLE final_export AS SELECT *,
+            COALESCE(runtime, MEDIAN(runtime) OVER (PARTITION BY (year/10*10))) as runtime_f,
+            LOG(votes + 1) as log_votes
+        FROM clean_base
+    """)
+    
+    os.makedirs('/app/processed', exist_ok=True)
+    con.execute("COPY final_export TO '/app/processed/train.parquet' (FORMAT PARQUET)")
+    
+    # Clean hidden sets for prediction
     for split in ["validation_hidden", "test_hidden"]:
-        path = os.path.join(data_dir, f"{split}.csv")
+        path = f"/app/imdb/{split}.csv"
         if os.path.exists(path):
-            con.execute(f"CREATE TABLE {split}_raw AS SELECT * FROM read_csv_auto('{path}', header=true)")
-
-    for js_file, table, id_key in [("directing.json", "directing", "director"), 
-                                   ("writing.json", "writing", "writer")]:
-        path = os.path.join(data_dir, js_file)
-        if os.path.exists(path):
-            with open(path) as f:
-                data = json.load(f)
-                df = pd.DataFrame(data).rename(columns={"movie": "tconst", id_key: "person_id"})
-                con.register(f"{table}_view", df)
-                con.execute(f"CREATE TABLE {table} AS SELECT * FROM {table}_view WHERE person_id != '\\N'")
-                con.execute(f"COPY {table} TO '{output_dir}/{table}.parquet' (FORMAT PARQUET)")
-
-    for src, dst, has_label in [("movies_raw", "movies_clean", True), 
-                                ("validation_hidden_raw", "validation_clean", False),
-                                ("test_hidden_raw", "test_clean", False)]:
-        if src not in [r[0] for r in con.execute("SHOW TABLES").fetchall()]: continue
-        l_col = ", label" if has_label else ""
-        con.execute(f"""
-            CREATE TABLE {dst} AS SELECT 
-                tconst, strip_diacritics(primaryTitle) as title_clean,
-                primaryTitle != originalTitle AS is_foreign,
-                LENGTH(primaryTitle) as title_len,
-                TRY_CAST(COALESCE(NULLIF(startYear, '\\N'), NULLIF(endYear, '\\N')) AS INTEGER) AS year,
-                TRY_CAST(NULLIF(runtimeMinutes, '\\N') AS INTEGER) AS runtime,
-                numVotes {l_col}
-            FROM {src}
-        """)
-
-    for src, dst in [("movies_clean", "train"), ("validation_clean", "validation"), ("test_clean", "test")]:
-        con.execute(f"""
-            CREATE TABLE {dst} AS SELECT *,
-                (year / 10 * 10) AS decade,
-                COALESCE(numVotes, MEDIAN(numVotes) OVER (PARTITION BY (year/10*10))) AS votes_filled,
-                COALESCE(runtime, CAST(MEDIAN(runtime) OVER (PARTITION BY (year/10*10)) AS INTEGER)) AS runtime_filled,
-                LOG(COALESCE(numVotes, 1) + 1) AS log_votes,
-                numVotes / GREATEST(runtime, 1) as vote_density
-            FROM {src}
-        """)
-        con.execute(f"COPY {dst} TO '{output_dir}/{dst}.parquet' (FORMAT PARQUET)")
+            con.execute(f"CREATE TABLE {split}_raw AS SELECT * FROM read_csv_auto('{path}')")
+            con.execute(f"""
+                COPY (SELECT tconst, clean_txt(primaryTitle) as title_clean,
+                TRY_CAST(NULLIF(startYear, '\\N') AS INTEGER) as year,
+                LEAST(GREATEST(TRY_CAST(NULLIF(runtimeMinutes, '\\N') AS INTEGER), 1), 210) as runtime,
+                LEAST(numVotes, 400000) as votes
+                FROM {split}_raw) TO '/app/processed/{split}.parquet' (FORMAT PARQUET)
+            """)
     con.close()
 
 if __name__ == "__main__":
