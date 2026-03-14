@@ -31,4 +31,11 @@ Each team can submit only five times per day.
  * [Reviews Leaderboard](http://big-data-competitions.westeurope.cloudapp.azure.com:8080/competitions/reviews)
  * [DBLP Leaderboard](http://big-data-competitions.westeurope.cloudapp.azure.com:8080/competitions/dblp)
 
-Please contact your TA in case you have further questions.
+### TO RUN, type:
+
+docker build -t imdb-project .
+
+docker run -it \
+  -v $(pwd)/imdb:/app/imdb \
+  -v $(pwd)/output:/app/output \
+  imdb-project
