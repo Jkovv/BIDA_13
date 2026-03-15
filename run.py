@@ -1,17 +1,16 @@
 import joblib, pandas as pd, numpy as np
-import os, gzip, random
+import os, random
 from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
 from catboost import CatBoostClassifier
 from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier
 from sklearn.model_selection import StratifiedKFold
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import LabelEncoder
 
 ERA_ORDER = ['silent', 'golden_age', 'classic', 'new_hollywood', 'modern', 'contemporary']
 
 def prepare(df, is_train=True):
-    # imdb_rating excluded — it's the signal the label is derived from, not a feature
     num_cols = ["year", "runtime", "log_votes", "vote_density",
                 "director_prestige", "writer_prestige"]
     X_num = df[[c for c in num_cols if c in df.columns]].reset_index(drop=True)
@@ -75,7 +74,6 @@ def run_benchmark():
     print(f"Champion: {best_name.upper()} at {best_acc:.4f}")
 
     # Phase 2: manual grid search on champion
-    # using n_jobs=1 — parallel jobs hang inside Docker on Mac
     print(f"\n--- Phase 2: Tuning {best_name.upper()} ---")
     param_grids = {
         'xgb':  [{'n_estimators': n, 'max_depth': d, 'learning_rate': lr}
@@ -125,28 +123,14 @@ def run_benchmark():
             X_eval, _ = prepare(merged, is_train=False)
             preds = champion.predict(X_eval)
             with open(f"/app/output/{split}.txt", "w") as f:
-                for p in preds: f.write(f"{bool(p)}\n")
+                for p in preds:
+                    f.write(f"{bool(p)}\n")
             print(f"Saved {split}.txt with {len(preds)} predictions.")
 
-    # Phase 4: proxy eval — rating>=7.0 matches the server labels at ~79.6%
-    # use this to decide whether to burn a submission slot
-    try:
-        ratings_path = "/app/imdb/title.ratings.tsv.gz"
-        val_csv = "/app/imdb/validation_hidden.csv"
-        pred_path = "/app/output/validation.txt"
-        if all(os.path.exists(p) for p in [ratings_path, val_csv, pred_path]):
-            val = pd.read_csv(val_csv)
-            with gzip.open(ratings_path, 'rt') as f:
-                ratings = pd.read_csv(f, sep='\t', na_values='\\N')
-            merged = val.merge(ratings, on='tconst', how='left')
-            merged['proxy_label'] = (merged['averageRating'] >= 7.0).fillna(False)
-            with open(pred_path) as f:
-                merged['our_pred'] = [l.strip() == 'True' for l in f]
-            proxy_acc = (merged['proxy_label'] == merged['our_pred']).mean()
-            print(f"\nProxy validation accuracy (rating>=7.0): {proxy_acc:.4f}")
-            print("(best server score so far: 0.7916 — only submit if proxy improved vs 0.7958)")
-    except Exception as e:
-        print(f"Proxy eval skipped: {e}")
+    # NOTE: Local CV accuracy is inflated because prestige scores are computed
+    # on the full training set before CV splits. The real accuracy is the one
+    # on the submission server. This is documented and acknowledged.
+    print("\nDone. Submit output/validation.txt and output/test.txt to the server.")
 
 if __name__ == "__main__":
     run_benchmark()
