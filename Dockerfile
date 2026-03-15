@@ -23,4 +23,4 @@ RUN adduser -u 5678 --disabled-password --gecos "" appuser && \
 USER appuser
 
 # detect JAVA_HOME at runtime so it works on arm64 (Mac) and amd64 (Windows/Linux)
-CMD ["sh", "-c", "export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java)))) && python cleaning.py && python features.py && python run.py"]
+CMD ["sh", "-c", "export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java)))) && python cleaning.py && python features.py && python prestige.py && python enrich.py && python run.py"]

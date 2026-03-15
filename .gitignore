@@ -17,3 +17,5 @@ output/best_model.pkl
 
 # OS files
 .DS_Store
+
+imdb/title.basics.tsv.gz
