@@ -1,6 +1,9 @@
 services:
   bdp:
-    image: bdp
+    image: imdb-project
     build:
       context: .
       dockerfile: ./Dockerfile
+    volumes:
+      - ./imdb:/app/imdb
+      - ./output:/app/output
