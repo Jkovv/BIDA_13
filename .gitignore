@@ -1,2 +1,19 @@
-.DS_Store
+# Python
+__pycache__/
+*.py[cod]
+*.class
+.venv/
+venv/
 
+# Large Model Files & Data
+*.pkl
+*.joblib
+processed/
+
+# Project Specific Outputs
+output/test.txt
+output/validation.txt
+output/best_model.pkl
+
+# OS files
+.DS_Store
