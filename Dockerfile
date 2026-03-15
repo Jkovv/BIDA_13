@@ -22,5 +22,5 @@ RUN adduser -u 5678 --disabled-password --gecos "" appuser && \
     chown -R appuser /app
 USER appuser
 
-# features.py runs last so it picks up prestige + genre columns
+# Pipeline: cleaning → prestige → enrich (genres) → features (TF-IDF) → run (model)
 CMD ["sh", "-c", "export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java)))) && python cleaning.py && python prestige.py && python enrich.py && python features.py && python run.py"]
