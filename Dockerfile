@@ -10,8 +10,6 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
-
 WORKDIR /app
 
 COPY requirements.txt .
@@ -24,4 +22,5 @@ RUN adduser -u 5678 --disabled-password --gecos "" appuser && \
     chown -R appuser /app
 USER appuser
 
-CMD ["sh", "-c", "python cleaning.py && python features.py && python run.py"]
+# detect JAVA_HOME at runtime so it works on arm64 (Mac) and amd64 (Windows/Linux)
+CMD ["sh", "-c", "export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java)))) && python cleaning.py && python features.py && python run.py"]
