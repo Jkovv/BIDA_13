@@ -2,7 +2,7 @@
 
 Binary classification pipeline to predict whether a movie is highly rated on IMDB.
 
-**Validation accuracy: 79.16%** | [IMDB Leaderboard](http://big-data-competitions.westeurope.cloudapp.azure.com:8080/competitions/imdb)
+**Validation accuracy: 88%** | [IMDB Leaderboard](http://big-data-competitions.westeurope.cloudapp.azure.com:8080/competitions/imdb)
 
 ---
 
