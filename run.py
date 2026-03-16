@@ -209,7 +209,8 @@ def prepare(df, selected=None):
            "ml_rating_mean", "ml_rating_std", "ml_rating_count",
            "ml_rating_median", "ml_log_count", "ml_tag_count"]
     genre = [c for c in df.columns if c.startswith("genre_")]
-    all_cols = [c for c in num if c in df.columns] + genre
+    genome = [c for c in df.columns if c.startswith("genome_")]
+    all_cols = [c for c in num if c in df.columns] + genre + genome
 
     X = df[all_cols].reset_index(drop=True)
     X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
