@@ -1,11 +1,5 @@
-"""
-cleaning.py — DuckDB ingestion + pandas cleaning.
-Produces train.parquet, validation_hidden.parquet, test_hidden.parquet
-"""
 import duckdb
 import os
-import re
-import math
 import unicodedata
 import pandas as pd
 import ftfy
@@ -19,126 +13,106 @@ def clean_txt(text):
     return ''.join(c for c in nfkd if not unicodedata.combining(c))
 
 
-def engineer_features(df, has_label):
-    """Apply all cleaning + feature engineering in pandas."""
+def process_split(con, table_name, has_label):
+    label_select = ", label" if has_label else ""
 
+    # DuckDB does the heavy lifting: type casting, null handling, winsorization, imputation
+    # We chose DuckDB here because these are all standard analytical SQL operations
+    # and it handles the CSV glob + window functions much faster than pandas
+    con.execute(f"""
+        CREATE OR REPLACE TABLE {table_name}_typed AS
+        SELECT
+            tconst, primaryTitle, originalTitle,
+            TRY_CAST(NULLIF(startYear, '\\N') AS INTEGER) AS year_raw,
+            TRY_CAST(NULLIF(endYear, '\\N') AS INTEGER) AS endYear_raw,
+            LEAST(GREATEST(TRY_CAST(NULLIF(runtimeMinutes, '\\N') AS INTEGER), 1), 210) AS runtime_raw,
+            TRY_CAST(numVotes AS DOUBLE) AS votes_raw
+            {label_select}
+        FROM {table_name}
+    """)
+
+    # impute missing runtime/votes with decade median using window functions
+    con.execute(f"""
+        CREATE OR REPLACE TABLE {table_name}_imputed AS
+        SELECT *,
+            COALESCE(year_raw, endYear_raw) AS year,
+            COALESCE(runtime_raw,
+                CAST(MEDIAN(runtime_raw) OVER (
+                    PARTITION BY (COALESCE(year_raw, endYear_raw) / 10 * 10)
+                ) AS INTEGER)
+            ) AS runtime,
+            LEAST(COALESCE(votes_raw,
+                MEDIAN(votes_raw) OVER (
+                    PARTITION BY (COALESCE(year_raw, endYear_raw) / 10 * 10)
+                )), 400000) AS votes
+        FROM {table_name}_typed
+    """)
+
+    # derive features - still in DuckDB because it's just math on columns
+    con.execute(f"""
+        CREATE OR REPLACE TABLE {table_name}_feat AS
+        SELECT
+            tconst, primaryTitle, originalTitle, year, runtime, votes,
+            LN(votes + 1) AS log_votes,
+            GREATEST(2026 - year, 1) AS film_age,
+            votes / GREATEST(runtime, 1) AS votes_per_minute,
+            CASE WHEN runtime < 90 THEN 1 ELSE 0 END AS runtime_short,
+            LN(votes + 1) * runtime AS votes_x_runtime,
+            CASE WHEN originalTitle IS NOT NULL
+                  AND originalTitle != ''
+                  AND originalTitle != primaryTitle
+                 THEN 1 ELSE 0 END AS is_foreign
+            {label_select}
+        FROM {table_name}_imputed
+    """)
+
+    # only thing we need pandas for: ftfy encoding repair (can't do this in SQL)
+    df = con.execute(f"SELECT * FROM {table_name}_feat").fetchdf()
     df["title_clean"] = df["primaryTitle"].apply(clean_txt)
-
-    # Parse year (use endYear as fallback)
-    df["startYear"] = df["startYear"].replace(r"\N", None)
-    df["endYear"] = df["endYear"].replace(r"\N", None)
-    df["year"] = pd.to_numeric(df["startYear"], errors="coerce").fillna(
-        pd.to_numeric(df["endYear"], errors="coerce")
-    ).astype("Int64")
-
-    # Runtime: parse + winsorise
-    df["runtimeMinutes"] = df["runtimeMinutes"].replace(r"\N", None)
-    df["runtime_raw"] = pd.to_numeric(df["runtimeMinutes"], errors="coerce")
-    df["runtime"] = df["runtime_raw"].clip(lower=1, upper=210)
-
-    # Impute missing runtime with decade median
-    df["decade"] = (df["year"] // 10 * 10)
-    decade_rt_median = df.groupby("decade")["runtime"].transform("median")
-    df["runtime"] = df["runtime"].fillna(decade_rt_median)
-
-    # Votes: cap outliers
-    df["votes"] = pd.to_numeric(df["numVotes"], errors="coerce").clip(upper=400000)
-
-    # Impute missing votes with decade median
-    decade_vote_median = df.groupby("decade")["votes"].transform("median")
-    df["votes"] = df["votes"].fillna(decade_vote_median)
-
-    # Log votes — strongest single predictor
-    df["log_votes"] = df["votes"].apply(lambda x: math.log(x + 1) if pd.notna(x) else 0)
-
-    # Vote density: votes / film_age — detects cult classics
-    df["vote_density"] = None
-    mask = df["year"].notna() & (df["year"] < 2026)
-    df.loc[mask, "vote_density"] = df.loc[mask, "votes"] / (2026 - df.loc[mask, "year"].astype(float))
-
-    # Era buckets (survivorship bias is real for older films)
-    def era(y):
-        if pd.isna(y): return "contemporary"
-        if y < 1930: return "silent"
-        if y < 1950: return "golden_age"
-        if y < 1970: return "classic"
-        if y < 1990: return "new_hollywood"
-        if y < 2005: return "modern"
-        return "contemporary"
-    df["era"] = df["year"].apply(era)
-
-    # Foreign film flag — foreign films have 60.7% True rate vs 47.7% domestic
-    df["originalTitle_clean"] = df["originalTitle"].apply(clean_txt)
-    df["is_foreign"] = (
-        df["originalTitle"].notna()
-        & (df["originalTitle"] != "")
-        & (df["originalTitle"] != df["primaryTitle"])
-    ).astype(int)
-
-    # Title-based features
-    df["title_length"] = df["title_clean"].str.len().fillna(0).astype(int)
-    df["title_word_count"] = df["title_clean"].str.split().str.len().fillna(0).astype(int)
-
-    # Sequel indicator — sequels have much lower True rate
-    df["is_sequel"] = df["primaryTitle"].apply(
-        lambda t: int(bool(re.search(r'\b(II|III|IV|V|VI|VII|VIII|2|3|4|5|6|7|8|Part|Chapter|Vol)\b', str(t))))
-    )
-
-    # Votes missing flag — missingness itself is a signal
-    df["votes_missing"] = df["numVotes"].isna().astype(int) | (df["numVotes"] == "").astype(int)
-
-    # Title was corrupted (had diacritics errors) — correlates with True label
-    df["title_corrupted"] = (df["primaryTitle"] != df["primaryTitle"].apply(
-        lambda t: ''.join(c for c in unicodedata.normalize('NFKD', str(t)) if not unicodedata.combining(c)) if pd.notna(t) else t
-    )).astype(int)
-
-    # Votes per minute of runtime
-    df["votes_per_minute"] = df["votes"] / df["runtime"].clip(lower=1)
-
-    keep = ["tconst", "title_clean", "year", "runtime", "votes", "log_votes",
-            "vote_density", "era", "is_foreign", "title_length", "title_word_count",
-            "is_sequel", "votes_missing", "title_corrupted", "votes_per_minute"]
-    if has_label:
-        keep.append("label")
-    return df[keep]
+    df = df.drop(columns=["primaryTitle", "originalTitle"], errors="ignore")
+    return df
 
 
 def run():
     con = duckdb.connect()
 
-    # --- Ingest with DuckDB (fast CSV glob reading) ---
     print("Step 1: Ingesting raw data with DuckDB")
-    con.execute("CREATE TABLE raw AS SELECT * FROM read_csv_auto('/app/imdb/train-*.csv')")
+    con.execute("CREATE TABLE raw AS SELECT * FROM read_csv_auto('/app/imdb/train-*.csv', header=true, ignore_errors=true)")
+
     n_raw = con.execute("SELECT COUNT(*) FROM raw").fetchone()[0]
     n_unique = con.execute("SELECT COUNT(DISTINCT tconst) FROM raw").fetchone()[0]
-    print(f"  {n_raw} raw rows, {n_unique} unique movies (each appears {n_raw//n_unique}x)")
+    print(f"  {n_raw} rows, {n_unique} unique movies (duplicated {n_raw // n_unique}x)")
 
-    # Deduplicate (every movie appears 3x with identical data)
+    # every movie appears 3x with identical data across the CSVs
     con.execute("CREATE TABLE deduped AS SELECT DISTINCT * FROM raw")
-    n_deduped = con.execute("SELECT COUNT(*) FROM deduped").fetchone()[0]
-    print(f"  {n_deduped} rows after dedup")
+    print(f"  {con.execute('SELECT COUNT(*) FROM deduped').fetchone()[0]} after dedup")
 
-    # --- Clean in pandas ---
-    print("\nStep 2: Cleaning & feature engineering")
-    df_train = con.execute("SELECT * FROM deduped").fetchdf()
-    train = engineer_features(df_train, has_label=True)
+    # quick data quality check
+    nulls = con.execute("""
+        SELECT
+            COUNT(*) FILTER (WHERE NULLIF(startYear, '\\N') IS NULL) AS null_year,
+            COUNT(*) FILTER (WHERE NULLIF(runtimeMinutes, '\\N') IS NULL) AS null_rt,
+            COUNT(*) FILTER (WHERE numVotes IS NULL) AS null_votes
+        FROM deduped
+    """).fetchone()
+    print(f"  Nulls: year={nulls[0]}, runtime={nulls[1]}, votes={nulls[2]}")
 
+    print("\nStep 2: Cleaning & features")
+    train = process_split(con, "deduped", has_label=True)
     os.makedirs('/app/processed', exist_ok=True)
     train.to_parquet('/app/processed/train.parquet', index=False)
-    print(f"  Saved train.parquet ({len(train)} rows, {len(train.columns)} cols)")
+    print(f"  train.parquet: {len(train)} rows, {len(train.columns)} cols")
 
-    # Process hidden sets
     for split in ["validation_hidden", "test_hidden"]:
         path = f"/app/imdb/{split}.csv"
         if os.path.exists(path):
-            con.execute(f"CREATE TABLE {split}_raw AS SELECT * FROM read_csv_auto('{path}')")
-            df = con.execute(f"SELECT * FROM {split}_raw").fetchdf()
-            result = engineer_features(df, has_label=False)
+            con.execute(f"CREATE TABLE {split}_raw AS SELECT * FROM read_csv_auto('{path}', header=true, ignore_errors=true)")
+            result = process_split(con, f"{split}_raw", has_label=False)
             result.to_parquet(f'/app/processed/{split}.parquet', index=False)
-            print(f"  Saved {split}.parquet ({len(result)} rows)")
+            print(f"  {split}.parquet: {len(result)} rows")
 
     con.close()
-    print("Cleaning done.\n")
+    print("Done.\n")
 
 
 if __name__ == "__main__":

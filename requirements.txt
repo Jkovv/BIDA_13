@@ -10,3 +10,4 @@ lightgbm
 catboost
 scikit-learn
 ftfy
+scipy

@@ -1,254 +1,294 @@
-"""
-run.py — Leak-free model training pipeline.
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 
-Key design: prestige scores are recomputed INSIDE each CV fold so that
-validation fold labels never leak into prestige features. For final
-predictions, prestige is computed on the full training set.
-"""
-import joblib
-import json
+import joblib, json, os, random
 import pandas as pd
 import numpy as np
-import os
-import random
-from xgboost import XGBClassifier
-from lightgbm import LGBMClassifier
-from catboost import CatBoostClassifier
-from sklearn.ensemble import (RandomForestClassifier, AdaBoostClassifier,
-                              GradientBoostingClassifier, VotingClassifier)
+from scipy.stats import mannwhitneyu, spearmanr
+from sklearn.feature_selection import mutual_info_classif
+from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import LabelEncoder
+from sklearn.ensemble import (RandomForestClassifier, GradientBoostingClassifier,
+                              VotingClassifier)
+from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
+from catboost import CatBoostClassifier
 
-ERA_ORDER = ['silent', 'golden_age', 'classic', 'new_hollywood', 'modern', 'contemporary']
 
-# ---- Prestige helpers (same logic as prestige.py, but callable per-fold) ----
+# -- prestige (recomputed per CV fold) --
 
-def load_directing(path="/app/imdb/directing.json"):
-    with open(path) as f:
-        d = json.load(f)
-    return pd.DataFrame({"tconst": list(d["movie"].values()),
-                          "director_id": list(d["director"].values())})
+DIRECTING, WRITING, DIR_COUNT, WRI_COUNT = None, None, None, None
 
-def load_writing(path="/app/imdb/writing.json"):
-    with open(path) as f:
-        w = json.load(f)
-    return pd.DataFrame({"tconst": [x["movie"] for x in w],
-                          "writer_id": [x["writer"] for x in w]})
-
-# Load once globally (these are static metadata, no labels)
-DIRECTING = None
-WRITING = None
-DIR_COUNT = None
-WRI_COUNT = None
-
-def init_crew_data():
+def _init_crew():
     global DIRECTING, WRITING, DIR_COUNT, WRI_COUNT
-    if DIRECTING is None:
-        DIRECTING = load_directing()
-        WRITING = load_writing()
-        DIR_COUNT = DIRECTING.groupby("tconst").size().reset_index(name="n_directors")
-        WRI_COUNT = WRITING.groupby("tconst").size().reset_index(name="n_writers")
+    if DIRECTING is not None:
+        return
+    with open("/app/imdb/directing.json") as f:
+        d = json.load(f)
+    DIRECTING = pd.DataFrame({"tconst": list(d["movie"].values()),
+                               "director_id": list(d["director"].values())})
+    with open("/app/imdb/writing.json") as f:
+        w = json.load(f)
+    WRITING = pd.DataFrame({"tconst": [x["movie"] for x in w],
+                             "writer_id": [x["writer"] for x in w]})
+    DIR_COUNT = DIRECTING.groupby("tconst").size().reset_index(name="n_directors")
+    WRI_COUNT = WRITING.groupby("tconst").size().reset_index(name="n_writers")
 
-def bayesian_prestige(df, id_col, label_col, k=20):
-    global_mean = df[label_col].mean()
-    stats = df.groupby(id_col)[label_col].agg(["mean", "count"]).reset_index()
-    stats.columns = [id_col, "person_mean", "n"]
-    stats["prestige"] = (stats["n"] / (stats["n"] + k)) * stats["person_mean"] + \
-                        (k / (stats["n"] + k)) * global_mean
-    return stats[[id_col, "prestige"]], global_mean
+def _bayes(df, id_col, label_col, k=20):
+    gm = df[label_col].mean()
+    s = df.groupby(id_col)[label_col].agg(["mean", "count"]).reset_index()
+    s.columns = [id_col, "pm", "n"]
+    s["prestige"] = (s["n"] / (s["n"] + k)) * s["pm"] + (k / (s["n"] + k)) * gm
+    return s[[id_col, "prestige"]], gm
 
-def compute_prestige_features(train_df, target_df):
-    """Compute prestige from train_df labels, apply to target_df rows.
-    train_df must have 'tconst' and 'label_int' columns.
-    target_df must have 'tconst' column.
-    Returns target_df with prestige columns added.
-    """
-    init_crew_data()
+def add_prestige(train_df, target_df):
+    _init_crew()
+    td = train_df.merge(DIRECTING, on="tconst", how="left")
+    tw = train_df.merge(WRITING, on="tconst", how="left")
+    dp, dg = _bayes(td.dropna(subset=["director_id"]), "director_id", "label_int")
+    wp, wg = _bayes(tw.dropna(subset=["writer_id"]), "writer_id", "label_int")
 
-    train_dir = train_df.merge(DIRECTING, on="tconst", how="left")
-    train_wri = train_df.merge(WRITING, on="tconst", how="left")
+    ds = DIRECTING.merge(dp, on="director_id", how="left")
+    ds["prestige"] = ds["prestige"].fillna(dg)
+    dm = ds.groupby("tconst")["prestige"].mean().reset_index()
+    dm.columns = ["tconst", "director_prestige"]
 
-    dir_prestige, dir_global = bayesian_prestige(
-        train_dir.dropna(subset=["director_id"]), "director_id", "label_int", k=20)
-    wri_prestige, wri_global = bayesian_prestige(
-        train_wri.dropna(subset=["writer_id"]), "writer_id", "label_int", k=20)
+    ws = WRITING.merge(wp, on="writer_id", how="left")
+    ws["prestige"] = ws["prestige"].fillna(wg)
+    wm = ws.groupby("tconst")["prestige"].mean().reset_index()
+    wm.columns = ["tconst", "writer_prestige"]
 
-    # Director experience based on train_df only
-    dir_exp = DIRECTING.merge(train_df[["tconst"]], on="tconst", how="inner")
-    dir_exp = dir_exp.groupby("director_id").size().reset_index(name="dir_experience")
-    wri_exp = WRITING.merge(train_df[["tconst"]], on="tconst", how="inner")
-    wri_exp = wri_exp.groupby("writer_id").size().reset_index(name="wri_experience")
-
-    # Build lookup tables
-    dir_scores = DIRECTING.merge(dir_prestige, on="director_id", how="left")
-    dir_scores["prestige"] = dir_scores["prestige"].fillna(dir_global)
-    dir_mean = dir_scores.groupby("tconst")["prestige"].mean().reset_index()
-    dir_mean.columns = ["tconst", "director_prestige"]
-
-    wri_scores = WRITING.merge(wri_prestige, on="writer_id", how="left")
-    wri_scores["prestige"] = wri_scores["prestige"].fillna(wri_global)
-    wri_mean = wri_scores.groupby("tconst")["prestige"].mean().reset_index()
-    wri_mean.columns = ["tconst", "writer_prestige"]
-
-    dir_exp_scores = DIRECTING.merge(dir_exp, on="director_id", how="left")
-    dir_exp_scores["dir_experience"] = dir_exp_scores["dir_experience"].fillna(0)
-    dir_exp_max = dir_exp_scores.groupby("tconst")["dir_experience"].max().reset_index()
-
-    wri_exp_scores = WRITING.merge(wri_exp, on="writer_id", how="left")
-    wri_exp_scores["wri_experience"] = wri_exp_scores["wri_experience"].fillna(0)
-    wri_exp_max = wri_exp_scores.groupby("tconst")["wri_experience"].max().reset_index()
-
-    # Drop existing prestige columns from target to avoid _x/_y dupes
-    prestige_cols = ["director_prestige", "writer_prestige", "n_directors",
-                     "n_writers", "dir_experience", "wri_experience"]
-    out = target_df.drop(columns=[c for c in prestige_cols if c in target_df.columns], errors="ignore")
-
-    out = out.merge(dir_mean, on="tconst", how="left")
-    out = out.merge(wri_mean, on="tconst", how="left")
+    drop_cols = ["director_prestige", "writer_prestige", "n_directors", "n_writers"]
+    out = target_df.drop(columns=[c for c in drop_cols if c in target_df.columns])
+    out = out.merge(dm, on="tconst", how="left")
+    out = out.merge(wm, on="tconst", how="left")
     out = out.merge(DIR_COUNT, on="tconst", how="left")
     out = out.merge(WRI_COUNT, on="tconst", how="left")
-    out = out.merge(dir_exp_max, on="tconst", how="left")
-    out = out.merge(wri_exp_max, on="tconst", how="left")
-
-    out["director_prestige"] = out["director_prestige"].fillna(dir_global)
-    out["writer_prestige"] = out["writer_prestige"].fillna(wri_global)
+    out["director_prestige"] = out["director_prestige"].fillna(dg)
+    out["writer_prestige"] = out["writer_prestige"].fillna(wg)
     out["n_directors"] = out["n_directors"].fillna(1).astype(int)
     out["n_writers"] = out["n_writers"].fillna(1).astype(int)
-    out["dir_experience"] = out["dir_experience"].fillna(0).astype(int)
-    out["wri_experience"] = out["wri_experience"].fillna(0).astype(int)
-
     return out
 
-# ---- Feature preparation ----
 
-PRESTIGE_COLS = ["director_prestige", "writer_prestige",
-                 "n_directors", "n_writers", "dir_experience", "wri_experience"]
+# -- statistical feature selection --
 
-def prepare(df):
-    """Build feature matrix X from dataframe. Returns (X, y_or_None)."""
-    num_cols = [
-        "year", "runtime", "log_votes", "vote_density", "votes_per_minute",
-        "is_foreign", "title_length", "title_word_count",
-        "is_sequel", "votes_missing", "title_corrupted",
-        # prestige
-        "director_prestige", "writer_prestige",
-        "n_directors", "n_writers", "dir_experience", "wri_experience",
-        # enrich
-        "is_movie", "is_short", "is_tvmovie",
+def _bh_correction(pvals, alpha):
+    """Benjamini-Hochberg FDR correction. returns (reject, adjusted_pvals)"""
+    n = len(pvals)
+    idx = np.argsort(pvals)
+    sorted_p = np.array(pvals)[idx]
+    adjusted = np.ones(n)
+    prev = 1.0
+    for i in range(n - 1, -1, -1):
+        adj = min(prev, sorted_p[i] * n / (i + 1))
+        adjusted[idx[i]] = adj
+        prev = adj
+    return adjusted < alpha, adjusted
+
+
+def _partial_spearman(X, feat, controls, y_col='label_int'):
+    """Spearman partial correlation: does feat correlate with label
+    after removing linear effect of controls? uses ranks for nonparametric."""
+    ranked = X[[feat] + controls + [y_col]].rank()
+    lr_x = LinearRegression().fit(ranked[controls], ranked[feat])
+    lr_y = LinearRegression().fit(ranked[controls], ranked[y_col])
+    resid_x = ranked[feat] - lr_x.predict(ranked[controls])
+    resid_y = ranked[y_col] - lr_y.predict(ranked[controls])
+    return spearmanr(resid_x, resid_y)
+
+
+def select_features(X, y, cols, n_perms=100, mw_alpha=0.05, mi_alpha=0.1, corr_thresh=0.85):
+    """Feature selection pipeline:
+    1) Mann-Whitney U with BH FDR correction (nonparametric, no normality assumption)
+    2) Permutation MI with BH correction (real MI vs null from shuffled labels)
+    3) Partial Spearman (interaction features only add value if they have
+       signal beyond their components)
+    4) Spearman redundancy (drop near-duplicates)"""
+
+    data = X.copy()
+    data['label_int'] = y
+
+    # 1. Mann-Whitney U
+    print("\n  1) Mann-Whitney U + Benjamini-Hochberg (alpha=0.05)")
+    mw_pvals, mw_effects = [], []
+    for c in cols:
+        U, p = mannwhitneyu(X.loc[y==0, c].values, X.loc[y==1, c].values, alternative='two-sided')
+        mw_pvals.append(p)
+        mw_effects.append(1 - (2 * U) / (sum(y==0) * sum(y==1)))
+
+    mw_reject, mw_padj = _bh_correction(mw_pvals, mw_alpha)
+
+    print(f"     {'feature':25s} {'effect_r':>9} {'p_adj':>10} {'sig':>4}")
+    for i, c in enumerate(cols):
+        print(f"     {c:25s} {mw_effects[i]:9.4f} {mw_padj[i]:10.2e} {'*' if mw_reject[i] else '':>4}")
+
+    # 2. Permutation MI
+    print(f"\n  2) Permutation MI ({n_perms} shuffles) + BH (alpha=0.1)")
+    real_mi = mutual_info_classif(X[cols], y, random_state=42, n_neighbors=5)
+    rng = np.random.RandomState(42)
+    null_mis = np.zeros((n_perms, len(cols)))
+    for i in range(n_perms):
+        null_mis[i] = mutual_info_classif(X[cols], rng.permutation(y), random_state=i, n_neighbors=5)
+
+    perm_pvals = [(np.sum(null_mis[:, j] >= real_mi[j]) + 1) / (n_perms + 1) for j in range(len(cols))]
+    mi_reject, mi_padj = _bh_correction(perm_pvals, mi_alpha)
+    mi_dict = dict(zip(cols, real_mi))
+
+    print(f"     {'feature':25s} {'MI':>7} {'null_95':>8} {'p_adj':>8} {'sig':>4}")
+    for j, c in enumerate(cols):
+        print(f"     {c:25s} {real_mi[j]:7.4f} {np.percentile(null_mis[:,j], 95):8.4f} {mi_padj[j]:8.3f} {'*' if mi_reject[j] else '':>4}")
+
+    # combine: must pass both
+    candidates = [c for i, c in enumerate(cols) if mw_reject[i] and mi_reject[i]]
+    dropped = [c for c in cols if c not in candidates]
+    if dropped:
+        print(f"\n  Dropped (failed tests): {dropped}")
+    print(f"  Passed: {candidates}")
+
+    # 3. Partial Spearman for interaction/derived features
+    # tests if a feature adds signal beyond its source features
+    interaction_tests = [
+        ('votes_x_runtime', ['log_votes', 'runtime']),
+        ('vote_density', ['log_votes', 'film_age']),
+        ('votes_per_minute', ['log_votes', 'runtime']),
+        ('runtime_short', ['runtime']),
+        ('runtime_long', ['runtime']),
+        ('era_ord', ['film_age']),
+        ('title_has_number', ['is_sequel']),
+        ('title_length', ['title_word_count']),
+        ('title_word_count', ['title_length']),
     ]
 
-    X_num = df[[c for c in num_cols if c in df.columns]].reset_index(drop=True)
-    X_num = X_num.apply(pd.to_numeric, errors='coerce').fillna(0)
+    partial_drops = set()
+    relevant_tests = [(f, c) for f, c in interaction_tests
+                      if f in candidates and all(x in candidates for x in c)]
+    if relevant_tests:
+        print(f"\n  3) Partial Spearman (interaction redundancy)")
+        for feat, controls in relevant_tests:
+            r, p = _partial_spearman(data, feat, controls)
+            verdict = "keep" if p < 0.05 else "DROP"
+            print(f"     {feat:25s} | {str(controls):30s} p={p:.3e} -> {verdict}")
+            if p >= 0.05:
+                partial_drops.add(feat)
 
-    if "era" in df.columns:
-        X_num["era_ord"] = df["era"].map(
-            {e: i for i, e in enumerate(ERA_ORDER)}
-        ).fillna(0).astype(int).values
+    candidates = [c for c in candidates if c not in partial_drops]
 
-    genre_cols = [c for c in df.columns if c.startswith("genre_")]
-    X_genre = df[genre_cols].reset_index(drop=True).fillna(0).astype(int) if genre_cols else pd.DataFrame()
+    # 4. Spearman redundancy
+    if len(candidates) > 1:
+        corr = X[candidates].corr(method='spearman')
+        to_drop = set()
+        redundant_found = False
+        for i, a in enumerate(candidates):
+            for j, b in enumerate(candidates):
+                if j <= i or a in to_drop or b in to_drop:
+                    continue
+                rho = abs(corr.loc[a, b])
+                if rho > corr_thresh:
+                    if not redundant_found:
+                        print(f"\n  4) Spearman redundancy (|rho| > {corr_thresh})")
+                        redundant_found = True
+                    worse = a if mi_dict.get(a, 0) < mi_dict.get(b, 0) else b
+                    print(f"     {a} ~ {b} (rho={rho:.3f}) -> drop {worse}")
+                    to_drop.add(worse)
+        candidates = [c for c in candidates if c not in to_drop]
 
-    X = pd.concat([X_num, X_genre], axis=1)
+    print(f"\n  SELECTED: {candidates} ({len(candidates)} features)")
+    return candidates
+
+
+# -- prepare --
+
+def prepare(df, selected=None):
+    num = ["runtime", "log_votes", "film_age", "vote_density", "votes_per_minute",
+           "runtime_short", "runtime_long", "votes_x_runtime", "is_foreign",
+           "director_prestige", "writer_prestige", "n_directors", "n_writers",
+           "is_movie", "is_short", "is_tvmovie"]
+    genre = [c for c in df.columns if c.startswith("genre_")]
+    all_cols = [c for c in num if c in df.columns] + genre
+
+    X = df[all_cols].reset_index(drop=True)
+    X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
     X = X.loc[:, ~X.columns.duplicated()]
-    X.columns = X.columns.astype(str)
 
-    has_label = "label" in df.columns
-    if has_label:
+    if selected:
+        X = X[[c for c in selected if c in X.columns]]
+
+    y = None
+    if "label" in df.columns:
         y = LabelEncoder().fit_transform(df["label"].astype(str))
-    else:
-        y = None
-
     return X.astype(np.float64), y
 
-# ---- Leak-free cross-validation ----
 
-def cv_score_leakfree(clf_factory, full_df, skf):
-    """
-    For each fold:
-      1. Split full_df into train_fold / val_fold by index
-      2. Compute prestige from train_fold labels only
-      3. Apply prestige to both folds
-      4. Build feature matrices
-      5. Train & score
-    """
-    # Encode labels once for splitting
-    y_all = LabelEncoder().fit_transform(full_df["label"].astype(str))
-    indices = np.arange(len(full_df))
-    scores = []
+# -- leak-free CV --
 
-    for fold_i, (tr_idx, val_idx) in enumerate(skf.split(indices, y_all)):
-        train_fold_df = full_df.iloc[tr_idx].copy().reset_index(drop=True)
-        val_fold_df = full_df.iloc[val_idx].copy().reset_index(drop=True)
-
-        # Compute label_int on train fold only
-        train_fold_df["label_int"] = ((train_fold_df["label"] == "True") |
-                                       (train_fold_df["label"] == True)).astype(int)
-
-        # Compute prestige from train fold, apply to both
-        train_fold_df = compute_prestige_features(train_fold_df, train_fold_df)
-        val_fold_df = compute_prestige_features(train_fold_df, val_fold_df)
-
-        # Drop helper columns
-        if "label_int" in train_fold_df.columns:
-            train_fold_df = train_fold_df.drop(columns=["label_int"])
-
-        X_tr, y_tr = prepare(train_fold_df)
-        X_val, y_val = prepare(val_fold_df)
-
-        clf = clf_factory()
+def cv_leakfree(clf_fn, df, skf, selected=None):
+    y_all = LabelEncoder().fit_transform(df["label"].astype(str))
+    accs = []
+    for tr_idx, val_idx in skf.split(np.arange(len(df)), y_all):
+        tr = df.iloc[tr_idx].copy().reset_index(drop=True)
+        va = df.iloc[val_idx].copy().reset_index(drop=True)
+        tr["label_int"] = ((tr["label"] == "True") | (tr["label"] == True)).astype(int)
+        tr = add_prestige(tr, tr)
+        va = add_prestige(tr, va)
+        tr = tr.drop(columns=["label_int"], errors="ignore")
+        X_tr, y_tr = prepare(tr, selected)
+        X_va, y_va = prepare(va, selected)
+        clf = clf_fn()
         clf.fit(X_tr, y_tr)
-        preds = clf.predict(X_val)
-        acc = accuracy_score(y_val, preds)
-        scores.append(acc)
+        accs.append(accuracy_score(y_va, clf.predict(X_va)))
+    return np.mean(accs), np.std(accs)
 
-    return np.mean(scores), np.std(scores)
 
+# -- main --
 
 def run_benchmark():
-    print("Step 6: Model training & prediction (leak-free CV)")
+    print("Step 6: Training")
 
-    train_feat_path = "/app/processed/train_features.parquet"
-    if not os.path.exists(train_feat_path):
-        print("  ERROR: train_features.parquet not found.")
+    feat_path = "/app/processed/train_features.parquet"
+    if not os.path.exists(feat_path):
+        print("  missing train_features.parquet")
         return
 
-    full_df = pd.read_parquet(train_feat_path)
+    df = pd.read_parquet(feat_path)
+    print(f"  {len(df)} movies")
 
-    # Quick feature count check (prestige columns may or may not be present yet)
-    X_tmp, y_tmp = prepare(full_df)
-    print(f"  Base features (before per-fold prestige): {X_tmp.shape[1]} cols")
-    print(f"  Training rows: {len(full_df)}")
-    print(f"  Label balance: {y_tmp.mean():.3f} positive rate")
+    # feature selection
+    df["label_int"] = ((df["label"] == "True") | (df["label"] == True)).astype(int)
+    df_pres = add_prestige(df, df)
+    X_tmp, _ = prepare(df_pres)
+    y_tmp = df_pres["label_int"].values
+    selected = select_features(X_tmp, y_tmp, list(X_tmp.columns))
+    df = df.drop(columns=["label_int"])
 
+    # models
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-
-    # ---- Phase 1: Model competition (leak-free) ----
-    model_factories = {
+    models = {
         'xgb':  lambda: XGBClassifier(n_estimators=300, max_depth=4, learning_rate=0.05,
                                        random_state=42, eval_metric='logloss'),
         'lgbm': lambda: LGBMClassifier(n_estimators=300, max_depth=4, random_state=42, verbose=-1),
         'cat':  lambda: CatBoostClassifier(iterations=300, depth=4, verbose=False, random_seed=42),
         'rf':   lambda: RandomForestClassifier(n_estimators=200, max_depth=12, random_state=42, n_jobs=-1),
-        'ada':  lambda: AdaBoostClassifier(n_estimators=100, random_state=42),
         'gbm':  lambda: GradientBoostingClassifier(n_estimators=300, max_depth=4, learning_rate=0.05,
                                                     random_state=42),
     }
 
+    scores = {}
+    print("\n  -- Model competition --")
     best_name, best_acc = None, 0
-    all_scores = {}
-    print("\n  --- Phase 1: Model Competition (leak-free CV) ---")
-    for name, factory in model_factories.items():
-        mean_acc, std_acc = cv_score_leakfree(factory, full_df, skf)
-        all_scores[name] = mean_acc
-        print(f"    {name.upper():5s}: {mean_acc:.4f} (+/- {std_acc:.4f})")
-        if mean_acc > best_acc:
-            best_acc, best_name = mean_acc, name
-    print(f"  Champion: {best_name.upper()} at {best_acc:.4f}")
+    for name, fn in models.items():
+        m, s = cv_leakfree(fn, df, skf, selected)
+        scores[name] = m
+        print(f"  {name:5s}: {m:.4f} +/- {s:.4f}")
+        if m > best_acc:
+            best_acc, best_name = m, name
+    print(f"  Winner: {best_name} ({best_acc:.4f})")
 
-    # ---- Phase 2: Tune champion (leak-free) ----
-    print(f"\n  --- Phase 2: Tuning {best_name.upper()} ---")
-    param_grids = {
+    # tune
+    print(f"\n  -- Tuning {best_name} --")
+    grids = {
         'xgb': [{'n_estimators': n, 'max_depth': d, 'learning_rate': lr,
                   'subsample': ss, 'colsample_bytree': cs, 'eval_metric': 'logloss'}
                 for n in [300, 500, 800] for d in [3, 4, 5, 6]
@@ -262,115 +302,87 @@ def run_benchmark():
                 for lr in [0.02, 0.05, 0.1] for l2 in [1, 3, 5]],
         'rf':  [{'n_estimators': n, 'max_depth': d, 'min_samples_leaf': ml}
                 for n in [200, 400, 600] for d in [8, 12, 16, None] for ml in [1, 3, 5]],
-        'ada': [{'n_estimators': n, 'learning_rate': lr}
-                for n in [100, 200, 300] for lr in [0.3, 0.5, 1.0]],
         'gbm': [{'n_estimators': n, 'max_depth': d, 'learning_rate': lr, 'subsample': ss}
                 for n in [300, 500, 800] for d in [3, 4, 5]
                 for lr in [0.02, 0.05, 0.1] for ss in [0.8, 1.0]],
     }
-
-    def make_constructor(name, params):
-        constructors = {
+    def make_fn(name, params):
+        ctors = {
             'xgb':  lambda: XGBClassifier(random_state=42, **params),
             'lgbm': lambda: LGBMClassifier(random_state=42, verbose=-1, **params),
             'cat':  lambda: CatBoostClassifier(verbose=False, random_seed=42, **params),
             'rf':   lambda: RandomForestClassifier(random_state=42, n_jobs=-1, **params),
-            'ada':  lambda: AdaBoostClassifier(random_state=42, **params),
             'gbm':  lambda: GradientBoostingClassifier(random_state=42, **params),
         }
-        return constructors[name]
+        return ctors[name]
 
     random.seed(42)
-    grid = param_grids[best_name]
-    sampled = random.sample(grid, min(12, len(grid)))
-    best_tuned_acc, best_params = best_acc, None
+    sample = random.sample(grids[best_name], min(12, len(grids[best_name])))
+    best_tuned, best_params = best_acc, None
+    for i, p in enumerate(sample):
+        fn = make_fn(best_name, p)
+        m, s = cv_leakfree(fn, df, skf, selected)
+        flag = " ***" if m > best_tuned else ""
+        print(f"  [{i+1}/{len(sample)}] {m:.4f}{flag}  {p}")
+        if m > best_tuned:
+            best_tuned, best_params = m, p
+    print(f"  Best: {best_params} -> {best_tuned:.4f}")
 
-    for i, params in enumerate(sampled):
-        factory = make_constructor(best_name, params)
-        mean_acc, std_acc = cv_score_leakfree(factory, full_df, skf)
-        marker = " ***" if mean_acc > best_tuned_acc else ""
-        print(f"    [{i+1}/{len(sampled)}] {mean_acc:.4f} +/- {std_acc:.4f}{marker}  {params}")
-        if mean_acc > best_tuned_acc:
-            best_tuned_acc, best_params = mean_acc, params
-
-    print(f"  Best tuned: {best_params} -> {best_tuned_acc:.4f}")
-
-    # ---- Phase 3: Ensemble top 3 (leak-free) ----
-    print("\n  --- Phase 3: Soft-voting ensemble ---")
-    sorted_models = sorted(all_scores.items(), key=lambda x: -x[1])
-    top3_names = [name for name, _ in sorted_models[:3]]
-    print(f"  Top 3: {[f'{n.upper()}({all_scores[n]:.4f})' for n in top3_names]}")
-
-    def ensemble_factory():
-        estimators = []
+    # ensemble
+    print("\n  -- Ensemble --")
+    top3 = [n for n, _ in sorted(scores.items(), key=lambda x: -x[1])[:3]]
+    def ens_fn():
+        parts = []
         if best_params:
-            estimators.append((best_name, make_constructor(best_name, best_params)()))
+            parts.append((best_name, make_fn(best_name, best_params)()))
         else:
-            estimators.append((best_name, model_factories[best_name]()))
-        for name in top3_names:
-            if name != best_name:
-                estimators.append((name, model_factories[name]()))
-        return VotingClassifier(estimators=estimators, voting='soft')
+            parts.append((best_name, models[best_name]()))
+        for n in top3:
+            if n != best_name:
+                parts.append((n, models[n]()))
+        return VotingClassifier(estimators=parts, voting='soft')
 
-    ens_acc, ens_std = cv_score_leakfree(ensemble_factory, full_df, skf)
-    print(f"  Ensemble CV: {ens_acc:.4f} +/- {ens_std:.4f}")
+    ens_m, ens_s = cv_leakfree(ens_fn, df, skf, selected)
+    print(f"  ensemble: {ens_m:.4f} +/- {ens_s:.4f}")
+    use_ens = ens_m > best_tuned
 
-    use_ensemble = ens_acc > best_tuned_acc
-    if use_ensemble:
-        print(f"  Using ENSEMBLE (beat single model by {ens_acc - best_tuned_acc:.4f})")
+    # final
+    print("\n  -- Final --")
+    df["label_int"] = ((df["label"] == "True") | (df["label"] == True)).astype(int)
+    final = add_prestige(df, df)
+    final = final.drop(columns=["label_int"], errors="ignore")
+    X_all, y_all = prepare(final, selected)
+    print(f"  {X_all.shape[1]} features: {list(X_all.columns)}")
+
+    if use_ens:
+        print("  using ensemble")
+        champ = ens_fn()
+    elif best_params:
+        champ = make_fn(best_name, best_params)()
     else:
-        print(f"  Using single {best_name.upper()} (ensemble didn't improve)")
+        champ = models[best_name]()
 
-    # ---- Phase 4: Final training on ALL data + predictions ----
-    print("\n  --- Phase 4: Final training on full data + predictions ---")
-
-    # Compute prestige on FULL training set for final model
-    full_df["label_int"] = ((full_df["label"] == "True") | (full_df["label"] == True)).astype(int)
-    full_with_prestige = compute_prestige_features(full_df, full_df)
-    if "label_int" in full_with_prestige.columns:
-        full_with_prestige = full_with_prestige.drop(columns=["label_int"])
-
-    X_all, y_all = prepare(full_with_prestige)
-    print(f"  Final feature matrix: {X_all.shape[0]} x {X_all.shape[1]}")
-
-    if use_ensemble:
-        champion = ensemble_factory()
-    else:
-        if best_params:
-            champion = make_constructor(best_name, best_params)()
-        else:
-            champion = model_factories[best_name]()
-
-    champion.fit(X_all, y_all)
-
+    champ.fit(X_all, y_all)
     os.makedirs('/app/output', exist_ok=True)
-    joblib.dump(champion, "/app/output/best_model.pkl")
+    joblib.dump(champ, "/app/output/best_model.pkl")
 
-    # Generate predictions for val/test
     for split in ["validation", "test"]:
         csv_path = f"/app/imdb/{split}_hidden.csv"
-        feat_path = f"/app/processed/{split}_hidden_features.parquet"
-        if os.path.exists(csv_path) and os.path.exists(feat_path):
-            order = pd.read_csv(csv_path)[['tconst']]
-            features = pd.read_parquet(feat_path)
-            merged = order.merge(features, on='tconst', how='left')
+        fp = f"/app/processed/{split}_hidden_features.parquet"
+        if not (os.path.exists(csv_path) and os.path.exists(fp)):
+            continue
+        order = pd.read_csv(csv_path)[['tconst']]
+        feats = pd.read_parquet(fp)
+        merged = order.merge(feats, on='tconst', how='left')
+        merged = add_prestige(df, merged)
+        X_eval, _ = prepare(merged, selected)
+        preds = champ.predict(X_eval)
+        with open(f"/app/output/{split}.txt", "w") as f:
+            for p in preds:
+                f.write(f"{bool(p)}\n")
+        print(f"  {split}.txt: {sum(bool(p) for p in preds)}/{len(preds)} True")
 
-            # Apply prestige computed from full training set
-            merged = compute_prestige_features(full_df, merged)
-
-            X_eval, _ = prepare(merged)
-            preds = champion.predict(X_eval)
-            with open(f"/app/output/{split}.txt", "w") as f:
-                for p in preds:
-                    f.write(f"{bool(p)}\n")
-            n_true = sum(bool(p) for p in preds)
-            print(f"  {split}.txt: {len(preds)} predictions ({n_true} True, {len(preds)-n_true} False)")
-        else:
-            if not os.path.exists(feat_path):
-                print(f"  WARNING: {feat_path} not found, skipping {split}")
-
-    print("\nPipeline complete. Local CV scores are now leak-free and trustworthy.")
-    print("Submit output/validation.txt and output/test.txt to the server.")
+    print("\nDone.")
 
 
 if __name__ == "__main__":
