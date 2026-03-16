@@ -205,7 +205,9 @@ def prepare(df, selected=None):
     num = ["runtime", "log_votes", "film_age", "vote_density", "votes_per_minute",
            "runtime_short", "runtime_long", "votes_x_runtime", "is_foreign",
            "director_prestige", "writer_prestige", "n_directors", "n_writers",
-           "is_movie", "is_short", "is_tvmovie"]
+           # movielens features
+           "ml_rating_mean", "ml_rating_std", "ml_rating_count",
+           "ml_rating_median", "ml_log_count", "ml_tag_count"]
     genre = [c for c in df.columns if c.startswith("genre_")]
     all_cols = [c for c in num if c in df.columns] + genre
 
