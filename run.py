@@ -11,7 +11,7 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import (RandomForestClassifier, GradientBoostingClassifier,
-                              VotingClassifier)
+                              ExtraTreesClassifier, VotingClassifier)
 from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
 from catboost import CatBoostClassifier
@@ -273,13 +273,14 @@ def run_benchmark():
     # models
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     models = {
-        'xgb':  lambda: XGBClassifier(n_estimators=300, max_depth=4, learning_rate=0.05,
-                                       random_state=42, eval_metric='logloss'),
-        'lgbm': lambda: LGBMClassifier(n_estimators=300, max_depth=4, random_state=42, verbose=-1),
-        'cat':  lambda: CatBoostClassifier(iterations=300, depth=4, verbose=False, random_seed=42),
+        # 'xgb':  lambda: XGBClassifier(n_estimators=300, max_depth=4, learning_rate=0.05,
+        #                                random_state=42, eval_metric='logloss'),
+        # 'lgbm': lambda: LGBMClassifier(n_estimators=300, max_depth=4, random_state=42, verbose=-1),
+        # 'cat':  lambda: CatBoostClassifier(iterations=300, depth=4, verbose=False, random_seed=42),
         'rf':   lambda: RandomForestClassifier(n_estimators=200, max_depth=12, random_state=42, n_jobs=-1),
-        'gbm':  lambda: GradientBoostingClassifier(n_estimators=300, max_depth=4, learning_rate=0.05,
-                                                    random_state=42),
+        # 'gbm':  lambda: GradientBoostingClassifier(n_estimators=300, max_depth=4, learning_rate=0.05,
+        #                                             random_state=42),
+        'et':   lambda: ExtraTreesClassifier(n_estimators=500, max_depth=16, random_state=42, n_jobs=-1),
     }
 
     scores = {}
@@ -308,6 +309,9 @@ def run_benchmark():
         'gbm': [{'n_estimators': n, 'max_depth': d, 'learning_rate': lr, 'subsample': ss}
                 for n in [300, 500, 800] for d in [3, 4, 5]
                 for lr in [0.02, 0.05, 0.1] for ss in [0.8, 1.0]],
+        'et':  [{'n_estimators': n, 'max_depth': d, 'min_samples_leaf': ml, 'max_features': mf}
+                for n in [400, 600, 800, 1000] for d in [12, 16, 20, 24, None]
+                for ml in [1, 2, 3] for mf in ['sqrt', 'log2', 0.5, 0.7]],
     }
     def make_fn(name, params):
         ctors = {
@@ -316,6 +320,7 @@ def run_benchmark():
             'cat':  lambda: CatBoostClassifier(verbose=False, random_seed=42, **params),
             'rf':   lambda: RandomForestClassifier(random_state=42, n_jobs=-1, **params),
             'gbm':  lambda: GradientBoostingClassifier(random_state=42, **params),
+            'et':   lambda: ExtraTreesClassifier(random_state=42, n_jobs=-1, **params),
         }
         return ctors[name]
 
