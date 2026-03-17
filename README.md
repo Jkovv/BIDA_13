@@ -14,7 +14,13 @@ prestige.py     Pandas   Director/writer Bayesian prestige scores (k=20), recomp
 enrich.py       Pandas   MovieLens 25M ratings + genres + genome tag features joined via tconst
 features.py     PySpark  TF-IDF on cleaned titles → feature parquet
 run.py          sklearn  4-stage feature selection + model competition (XGB/LGBM/CatBoost/RF/GBM) + grid search → predictions
-awards.py       Pandas   Oscar nominations/wins (not in pipeline — sparse coverage, kept for analysis)
+```
+
+**Not in pipeline (kept for analysis):**
+```
+awards.py          Oscar nominations/wins — title join matched ~11%, too sparse for feature selection
+prestige_lists.py  TSPDT rank + Criterion Collection — title join matched ~2-3%, same issue
+loyalty.py         Director-DP collaboration count from TMDB credits — matched ~10%, failed MI test
 ```
 
 ### How to Run
@@ -52,6 +58,11 @@ imdb/
 
 MovieLens 25M (~262MB) is downloaded automatically on first run and cached after.
 
+Additional datasets used for analysis (not required to run pipeline):
+- TSPDT 1000 Greatest Films: https://theyshootpictures.com/gf1000_all1000films_table.php → save as `tspdt.csv`
+- Criterion Collection: https://www.kaggle.com/datasets/shankhadeepmaiti/the-criterion-collection → `criterion.csv`
+- TMDB credits + metadata: https://www.kaggle.com/datasets/rounakbanik/the-movies-dataset → `tmdb_credits.csv` (needs unzipping) + `tmdb_metadata.csv`
+
 ### Features Used
 
 | Feature | Source | Description |
@@ -82,7 +93,10 @@ Four-stage statistical selection before any model sees the data:
 
 **Genome tag selection:** hand-picked 19 tags covering artistic merit, tone, and audience reception (boring, predictable, masterpiece, atmospheric, etc.). We also implemented data-driven selection via point-biserial correlation across all 1,128 genome tags (top 50 by |r|) — same validation accuracy, kept commented in `enrich.py` for reference.
 
-**Oscar awards:** attempted enrichment via `awards.py` (kaggle: unanimad/the-oscar-award). Title join only matched ~11% of training movies — too sparse to pass feature selection. Kept in repo as an example of a feature that failed the pipeline's statistical tests.
+**Failed enrichments (Analysis talking points):**
+- Oscar awards, TSPDT rank, Criterion Collection: institutionally meaningful signals but title+year fuzzy join coverage was too low (2–11%) to pass statistical significance tests on our 8k movie dataset
+- Director-DP loyalty (TMDB): signal exists in principle but insufficient training examples with prior collaborations
+- These failures are themselves informative — the pipeline's statistical gatekeeping correctly identified that sparse features hurt more than they help
 
 ### Submitting predictions
 
