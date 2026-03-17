@@ -6,6 +6,8 @@ __pycache__/
 venv/
 
 # Large Model Files & Data
+imdb/ml-25m/
+imdb/ml-25m.zip
 *.pkl
 *.joblib
 processed/
