@@ -11,3 +11,4 @@ catboost
 scikit-learn
 ftfy
 scipy
+openpyxl
