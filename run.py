@@ -302,8 +302,9 @@ def run_benchmark():
         'cat': [{'iterations': n, 'depth': d, 'learning_rate': lr, 'l2_leaf_reg': l2}
                 for n in [300, 500, 800] for d in [4, 6, 8]
                 for lr in [0.02, 0.05, 0.1] for l2 in [1, 3, 5]],
-        'rf':  [{'n_estimators': n, 'max_depth': d, 'min_samples_leaf': ml}
-                for n in [200, 400, 600] for d in [8, 12, 16, None] for ml in [1, 3, 5]],
+        'rf':  [{'n_estimators': n, 'max_depth': d, 'min_samples_leaf': ml, 'max_features': mf}
+                for n in [200, 400, 600, 800, 1000] for d in [8, 12, 16, 20, 24, None]
+                for ml in [1, 2, 3, 5] for mf in ['sqrt', 'log2', 0.5, 0.7, None]],
         'gbm': [{'n_estimators': n, 'max_depth': d, 'learning_rate': lr, 'subsample': ss}
                 for n in [300, 500, 800] for d in [3, 4, 5]
                 for lr in [0.02, 0.05, 0.1] for ss in [0.8, 1.0]],
@@ -325,7 +326,7 @@ def run_benchmark():
     for model_name in models.keys():
         print(f"\n  {model_name.upper()} (default: {scores[model_name]:.4f}):")
         random.seed(42)
-        n_samples = min(10, len(grids[model_name]))
+        n_samples = min(20, len(grids[model_name]))
         sample = random.sample(grids[model_name], n_samples)
         best_p, best_s = None, scores[model_name]
 
