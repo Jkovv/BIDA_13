@@ -103,11 +103,12 @@ Four-stage statistical selection runs before any model sees the data:
 
 **Genome tag selection:** we hand-picked 19 tags covering artistic merit, tone, and audience reception (boring, predictable, masterpiece, atmospheric, etc.). We also implemented a data-driven version that computes point-biserial correlation across all 1,128 genome tags and takes the top 50 by absolute correlation -- same validation accuracy (88.59%), kept commented out in `enrich.py` for reference.
 
-**Failed enrichments (what we tried and why it didn't work):**
+**Failed enrichments (what we tried and why it did not work):**
 
 - Oscar awards, TSPDT rank, Criterion Collection: strong signals in theory but title+year fuzzy join coverage was too low (2-11% of training movies). Features failed both Mann-Whitney and permutation MI tests. Sparse features like these hurt more than they help on an 8k movie dataset.
-- Director-DP loyalty (from TMDB credits): the signal exists in principle (Scorsese-Ballhaus, Nolan-Pfister type pairings do correlate with quality) but we didn't have enough training examples with prior collaborations to pass the statistical tests.
-- Stacking (meta-learner): trained a logistic regression on out-of-fold probabilities from all 5 base models. The meta-learner collapsed to RF-dominant weights (RF: +3.27, XGB: -0.35), meaning the models weren't diverse enough for stacking to add value. Reverted to single champion model.
+- Director-DP loyalty (from TMDB credits): the signal exists in principle (recurring director-cinematographer pairings do correlate with quality) but not enough training examples with prior collaborations to pass the statistical tests.
+- TMDB metadata (budget, revenue, popularity, original_language): budget and revenue were missing for ~31% of training movies (studios often do not disclose). All four features failed the permutation MI test and were dropped by the selection pipeline.
+- Stacking (meta-learner): trained a logistic regression on out-of-fold probabilities from all 5 base models. The meta-learner collapsed to RF-dominant weights (RF: +3.27, XGB: -0.35), meaning the models were not diverse enough for stacking to add value. Reverted to single champion model.
 
 These failures are documented in the repo (`awards.py`, `prestige_lists.py`, `loyalty.py`) as examples of features that the pipeline's statistical gatekeeping correctly rejected.
 
