@@ -1,18 +1,20 @@
 import os
 import zipfile
 import urllib.request
+import json
 import pandas as pd
 import numpy as np
 
-# MovieLens 25M - GroupLens, University of Minnesota
+# ---- MovieLens 25M (GroupLens, University of Minnesota) ----
 # different source/userbase from IMDB — allowed as external data
 ML_URL = "https://files.grouplens.org/datasets/movielens/ml-25m.zip"
 ML_ZIP = "/app/imdb/ml-25m.zip"
 ML_DIR = "/app/imdb/ml-25m"
 
-# hand-picked genome tags that are predictive of quality/prestige
-# covers: artistic merit, audience reception, cultural impact, tone
-GENOME_TAGS = [
+# hand-picked MovieLens tag relevance features
+# MovieLens assigns continuous [0,1] relevance scores per movie for ~1000
+# user-generated tags. we pick ones relevant to quality/reception.
+MOVIELENS_TAGS = [
     "thought-provoking", "masterpiece", "atmospheric", "cult film",
     "visually appealing", "feel-good", "boring", "predictable",
     "original", "oscar (best picture)", "critically acclaimed",
@@ -22,39 +24,41 @@ GENOME_TAGS = [
 
 # -- keep this block, used for poster presentation --
 # tried replacing the hand-picked list above with correlation-based selection
-# across all ~1128 genome tags. point-biserial correlation against training
-# labels, top 50 by |r|. same validation accuracy (0.8859) but more principled.
-# reverted because test prediction distribution shifted and hand-picked is safer.
+# across all ~1128 MovieLens tag relevance scores. point-biserial correlation
+# against training labels, top 50 by |r|. same validation accuracy (0.8859)
+# but more principled. reverted because test prediction distribution shifted
+# and hand-picked is safer.
 #
 # from scipy import stats
-# N_GENOME_TAGS = 50
+# N_SELECTED_TAGS = 50
 #
-# def select_genome_tags(train_tconsts_labels, links, top_n=N_GENOME_TAGS):
-#     genome_scores = pd.read_csv(os.path.join(ML_DIR, "genome-scores.csv"))
-#     genome_tags = pd.read_csv(os.path.join(ML_DIR, "genome-tags.csv"))
-#     genome_scores = genome_scores.merge(links[["movieId", "tconst"]], on="movieId", how="inner")
-#     pivoted = genome_scores.pivot_table(
-#         index="tconst", columns="tagId", values="relevance", aggfunc="first"
-#     )
-#     train_genome = train_tconsts_labels.join(pivoted, how="inner")
-#     y = train_genome["label_int"].values
-#     tag_ids = [c for c in train_genome.columns if c != "label_int"]
+# def select_tags_by_correlation(train_tconsts_labels, links, top_n=N_SELECTED_TAGS):
+#     scores = pd.read_csv(os.path.join(ML_DIR, "genome-scores.csv"))
+#     tags = pd.read_csv(os.path.join(ML_DIR, "genome-tags.csv"))
+#     scores = scores.merge(links[["movieId", "tconst"]], on="movieId", how="inner")
+#     pivoted = scores.pivot_table(index="tconst", columns="tagId", values="relevance", aggfunc="first")
+#     train_data = train_tconsts_labels.join(pivoted, how="inner")
+#     y = train_data["label_int"].values
 #     correlations = {}
-#     for tag_id in tag_ids:
-#         x = train_genome[tag_id].values
+#     for tag_id in [c for c in train_data.columns if c != "label_int"]:
+#         x = train_data[tag_id].values
 #         if x.std() > 0:
 #             r, _ = stats.pointbiserialr(y, x)
 #             correlations[tag_id] = abs(r)
 #     top_tag_ids = sorted(correlations, key=correlations.get, reverse=True)[:top_n]
-#     tag_name_map = genome_tags.set_index("tagId")["tag"].to_dict()
+#     tag_name_map = tags.set_index("tagId")["tag"].to_dict()
 #     selected = [(tid, tag_name_map[tid]) for tid in top_tag_ids if tid in tag_name_map]
-#     print(f"  Top {top_n} genome tags selected from {len(correlations)} candidates")
-#     print(f"  Top 5: {[name for _, name in selected[:5]]}")
 #     return selected
 # --
 
+# ---- Bechdel Test (bechdeltest.com) ----
+# measures female representation in fiction (score 0-3)
+# independent of IMDB, joinable via imdb_id
+BECHDEL_URL = "https://bechdeltest.com/api/v1/getAllMovies"
+BECHDEL_CACHE = "/app/imdb/bechdel_all.json"
 
-def download_and_extract():
+
+def download_and_extract_ml():
     if os.path.exists(ML_DIR):
         print("  ml-25m already extracted.")
         return
@@ -69,34 +73,67 @@ def download_and_extract():
 
 
 def tconst_from_imdbid(imdb_id):
-    return f"tt{int(imdb_id):07d}"
+    try:
+        return f"tt{int(imdb_id):07d}"
+    except (ValueError, TypeError):
+        return None
 
 
-def load_genome_features(links):
-    """Load tag genome: relevance scores for selected tags per movie.
-    genome-scores.csv has (movieId, tagId, relevance) for ~1000 tags x 10k movies.
-    relevance is a continuous [0,1] score — how well the tag describes the movie."""
+def load_tag_relevance_features(links):
+    """Two approaches combined:
+    1) Original 19 hand-picked tags as individual features (mltag_boring, etc.)
+    2) PCA on ALL 1128 tags → 30 components (mltag_pc_0, etc.)
+    
+    The hand-picked tags give interpretable features for the poster.
+    The PCA components capture the full semantic space without cherry-picking."""
+    from sklearn.decomposition import PCA
+
     genome_scores = pd.read_csv(os.path.join(ML_DIR, "genome-scores.csv"))
     genome_tags = pd.read_csv(os.path.join(ML_DIR, "genome-tags.csv"))
 
+    # pivot ALL tags into a wide matrix (movieId x tagId)
+    all_pivoted = genome_scores.pivot_table(
+        index="movieId", columns="tagId", values="relevance", aggfunc="first"
+    )
+    all_pivoted = all_pivoted.fillna(0)
+    print(f"  Full tag matrix: {all_pivoted.shape[0]} movies x {all_pivoted.shape[1]} tags")
+
+    # PCA on the full matrix
+    N_COMPONENTS = 30
+    pca = PCA(n_components=N_COMPONENTS, random_state=42)
+    components = pca.fit_transform(all_pivoted.values)
+    explained = pca.explained_variance_ratio_.sum()
+    print(f"  PCA: {N_COMPONENTS} components, {explained:.1%} variance explained")
+
+    pca_df = pd.DataFrame(
+        components,
+        columns=[f"mltag_pc_{i}" for i in range(N_COMPONENTS)],
+        index=all_pivoted.index
+    ).reset_index()
+
+    # also extract the 19 hand-picked tags as individual features
     selected_tags = genome_tags[genome_tags["tag"].str.lower().isin(
-        [t.lower() for t in GENOME_TAGS]
+        [t.lower() for t in MOVIELENS_TAGS]
     )].copy()
-    selected_tags["col_name"] = "genome_" + selected_tags["tag"].str.lower() \
+    selected_tags["col_name"] = "mltag_" + selected_tags["tag"].str.lower() \
         .str.replace(" ", "_").str.replace("-", "_").str.replace("(", "").str.replace(")", "")
 
     filtered = genome_scores[genome_scores["tagId"].isin(selected_tags["tagId"])]
     filtered = filtered.merge(selected_tags[["tagId", "col_name"]], on="tagId")
+    hand_picked = filtered.pivot_table(
+        index="movieId", columns="col_name", values="relevance", aggfunc="first"
+    ).reset_index()
+    hand_picked.columns.name = None
 
-    pivoted = filtered.pivot_table(index="movieId", columns="col_name",
-                                   values="relevance", aggfunc="first").reset_index()
-    pivoted.columns.name = None
+    # merge PCA + hand-picked
+    result = pca_df.merge(hand_picked, on="movieId", how="outer")
+    result = result.merge(links[["movieId", "tconst"]], on="movieId", how="inner")
+    result = result.drop(columns=["movieId"])
 
-    pivoted = pivoted.merge(links[["movieId", "tconst"]], on="movieId", how="inner")
-    pivoted = pivoted.drop(columns=["movieId"])
-
-    print(f"  Genome: {len(pivoted)} movies, {len(pivoted.columns)-1} tag features")
-    return pivoted
+    n_features = len([c for c in result.columns if c != "tconst"])
+    print(f"  Tag features: {len(result)} movies, {n_features} features "
+          f"(19 hand-picked + {N_COMPONENTS} PCA)")
+    return result
 
 
 def load_movielens_features():
@@ -131,53 +168,98 @@ def load_movielens_features():
     movies = movies.merge(tag_counts, on="movieId", how="left")
     movies["ml_tag_count"] = movies["ml_tag_count"].fillna(0).astype(int)
 
-    genome = load_genome_features(links)
-    movies = movies.merge(genome, on="tconst", how="left")
+    tag_rel = load_tag_relevance_features(links)
+    movies = movies.merge(tag_rel, on="tconst", how="left")
 
     genre_cols = [c for c in movies.columns if c.startswith('genre_')]
-    genome_cols = [c for c in movies.columns if c.startswith('genome_')]
+    mltag_cols = [c for c in movies.columns if c.startswith('mltag_')]
     ml_cols = ["ml_rating_mean", "ml_rating_std", "ml_rating_count",
                "ml_rating_median", "ml_log_count", "ml_tag_count"]
-    keep = ["tconst"] + genre_cols + ml_cols + genome_cols
+    keep = ["tconst"] + genre_cols + ml_cols + mltag_cols
     return movies[keep]
+
+
+def load_bechdel_features():
+    """Bechdel test scores (0-3) from bechdeltest.com."""
+    if not os.path.exists(BECHDEL_CACHE):
+        print("  Downloading Bechdel test data...")
+        try:
+            req = urllib.request.Request(BECHDEL_URL, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode())
+            with open(BECHDEL_CACHE, 'w') as f:
+                json.dump(data, f)
+            print(f"  Downloaded {len(data)} movies")
+        except Exception as e:
+            print(f"  Bechdel download failed: {e}, skipping")
+            return None
+    else:
+        print("  Bechdel data cached.")
+        with open(BECHDEL_CACHE) as f:
+            data = json.load(f)
+
+    df = pd.DataFrame(data)
+    df["tconst"] = df["imdbid"].apply(tconst_from_imdbid)
+    df["bechdel_score"] = pd.to_numeric(df["rating"], errors="coerce").fillna(0).astype(int)
+    df["bechdel_pass"] = (df["bechdel_score"] == 3).astype(int)
+    return df[["tconst", "bechdel_score", "bechdel_pass"]].drop_duplicates(subset=["tconst"])
 
 
 def run():
     if not os.path.exists("/app/processed/train.parquet"):
         return
 
-    print("Step 4: MovieLens enrichment (ratings + genres + genome)")
-    download_and_extract()
+    print("Step 4: External data enrichment")
 
+    # MovieLens
+    download_and_extract_ml()
     ml_features = load_movielens_features()
-    new_cols = [c for c in ml_features.columns if c != "tconst"]
-    genome_cols = [c for c in new_cols if c.startswith("genome_")]
-    print(f"  {len(ml_features)} movies total, {len(new_cols)} features "
-          f"({len(genome_cols)} genome tags)")
+    ml_cols = [c for c in ml_features.columns if c != "tconst"]
+
+    # Bechdel
+    bechdel_features = load_bechdel_features()
 
     for name in ["train", "validation_hidden", "test_hidden"]:
         path = f"/app/processed/{name}.parquet"
-        if os.path.exists(path):
-            df = pd.read_parquet(path)
-            df = df.drop(columns=[c for c in new_cols if c in df.columns], errors="ignore")
-            before = len(df)
-            df = df.merge(ml_features, on="tconst", how="left")
+        if not os.path.exists(path):
+            continue
 
-            matched = df["ml_rating_mean"].notna().sum()
+        df = pd.read_parquet(path)
+        before = len(df)
 
-            for col in new_cols:
-                if col.startswith("genre_"):
-                    df[col] = df[col].fillna(0).astype(int)
-                elif col in ["ml_tag_count", "ml_rating_count"]:
-                    df[col] = df[col].fillna(0)
-                elif col.startswith("genome_"):
-                    df[col] = df[col].fillna(df[col].median())
-                else:
-                    df[col] = df[col].fillna(df[col].median())
+        # MovieLens
+        df = df.drop(columns=[c for c in ml_cols if c in df.columns], errors="ignore")
+        df = df.merge(ml_features, on="tconst", how="left")
+        for col in ml_cols:
+            if col.startswith("genre_"):
+                df[col] = df[col].fillna(0).astype(int)
+            elif col in ["ml_tag_count", "ml_rating_count"]:
+                df[col] = df[col].fillna(0)
+            elif col.startswith("mltag_"):
+                df[col] = df[col].fillna(df[col].median())
+            else:
+                df[col] = df[col].fillna(df[col].median())
+        ml_matched = df["ml_rating_mean"].notna().sum()
 
-            df.to_parquet(path, index=False)
-            print(f"  {name}: matched {matched}/{before} movies")
+        # Bechdel
+        bechdel_matched = 0
+        if bechdel_features is not None:
+            bech_cols = ["bechdel_score", "bechdel_pass"]
+            df = df.drop(columns=[c for c in bech_cols if c in df.columns], errors="ignore")
+            df = df.merge(bechdel_features, on="tconst", how="left")
+            df["bechdel_score"] = df["bechdel_score"].fillna(0).astype(int)
+            df["bechdel_pass"] = df["bechdel_pass"].fillna(0).astype(int)
+            bechdel_matched = (df["bechdel_score"] > 0).sum()
 
+        df.to_parquet(path, index=False)
+        print(f"  {name}: ML={ml_matched}/{before}, Bechdel={bechdel_matched}/{before}")
+
+    # failed enrichments documented for poster:
+    # - Oscar awards: 11% match, failed MW+MI tests (awards.py)
+    # - TSPDT 1000: 2.6% match, same (prestige_lists.py)
+    # - Criterion: 3.4% match, same (prestige_lists.py)
+    # - Director-DP loyalty: 10% match, failed MI (loyalty.py)
+    # - TMDB budget/revenue/popularity/language: 31% missing budget, all failed permutation MI
     print()
 
 

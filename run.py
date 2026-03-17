@@ -160,6 +160,8 @@ def select_features(X, y, cols, n_perms=100, mw_alpha=0.05, mi_alpha=0.1, corr_t
         ('title_has_number', ['is_sequel']),
         ('title_length', ['title_word_count']),
         ('title_word_count', ['title_length']),
+        ('bechdel_pass', ['bechdel_score']),
+        ('ml_log_count', ['ml_rating_count']),
     ]
 
     partial_drops = set()
@@ -205,12 +207,14 @@ def prepare(df, selected=None):
     num = ["runtime", "log_votes", "film_age", "vote_density", "votes_per_minute",
            "runtime_short", "runtime_long", "votes_x_runtime", "is_foreign",
            "director_prestige", "writer_prestige", "n_directors", "n_writers",
-           # movielens features
+           # movielens aggregate
            "ml_rating_mean", "ml_rating_std", "ml_rating_count",
-           "ml_rating_median", "ml_log_count", "ml_tag_count"]
+           "ml_rating_median", "ml_log_count", "ml_tag_count",
+           # bechdel
+           "bechdel_score", "bechdel_pass"]
     genre = [c for c in df.columns if c.startswith("genre_")]
-    genome = [c for c in df.columns if c.startswith("genome_")]
-    all_cols = [c for c in num if c in df.columns] + genre + genome
+    mltag = [c for c in df.columns if c.startswith("mltag_")]
+    all_cols = [c for c in num if c in df.columns] + genre + mltag
 
     X = df[all_cols].reset_index(drop=True)
     X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
@@ -279,18 +283,13 @@ def run_benchmark():
     }
 
     scores = {}
-    print("\n  -- Model competition --")
-    best_name, best_acc = None, 0
+    print("\n  -- Phase 1: Defaults (quick screening) --")
     for name, fn in models.items():
         m, s = cv_leakfree(fn, df, skf, selected)
         scores[name] = m
         print(f"  {name:5s}: {m:.4f} +/- {s:.4f}")
-        if m > best_acc:
-            best_acc, best_name = m, name
-    print(f"  Winner: {best_name} ({best_acc:.4f})")
 
-    # tune
-    print(f"\n  -- Tuning {best_name} --")
+    # tune ALL models, not just the winner
     grids = {
         'xgb': [{'n_estimators': n, 'max_depth': d, 'learning_rate': lr,
                   'subsample': ss, 'colsample_bytree': cs, 'eval_metric': 'logloss'}
@@ -319,37 +318,64 @@ def run_benchmark():
         }
         return ctors[name]
 
-    random.seed(42)
-    sample = random.sample(grids[best_name], min(12, len(grids[best_name])))
-    best_tuned, best_params = best_acc, None
-    for i, p in enumerate(sample):
-        fn = make_fn(best_name, p)
-        m, s = cv_leakfree(fn, df, skf, selected)
-        flag = " ***" if m > best_tuned else ""
-        print(f"  [{i+1}/{len(sample)}] {m:.4f}{flag}  {p}")
-        if m > best_tuned:
-            best_tuned, best_params = m, p
-    print(f"  Best: {best_params} -> {best_tuned:.4f}")
+    print("\n  -- Phase 2: Tuning ALL models --")
+    tuned_params = {}
+    tuned_scores = {}
 
-    # ensemble
-    print("\n  -- Ensemble --")
-    top3 = [n for n, _ in sorted(scores.items(), key=lambda x: -x[1])[:3]]
+    for model_name in models.keys():
+        print(f"\n  {model_name.upper()} (default: {scores[model_name]:.4f}):")
+        random.seed(42)
+        n_samples = min(10, len(grids[model_name]))
+        sample = random.sample(grids[model_name], n_samples)
+        best_p, best_s = None, scores[model_name]
+
+        for i, p in enumerate(sample):
+            fn = make_fn(model_name, p)
+            m, s = cv_leakfree(fn, df, skf, selected)
+            flag = " ***" if m > best_s else ""
+            print(f"    [{i+1}/{n_samples}] {m:.4f}{flag}  {p}")
+            if m > best_s:
+                best_s, best_p = m, p
+
+        tuned_params[model_name] = best_p
+        tuned_scores[model_name] = best_s
+        status = f"tuned to {best_s:.4f}" if best_p else f"default was best ({best_s:.4f})"
+        print(f"    -> {status}")
+
+    # compare all tuned models
+    print("\n  -- Phase 3: Tuned comparison --")
+    for name in sorted(tuned_scores, key=tuned_scores.get, reverse=True):
+        delta = tuned_scores[name] - scores[name]
+        print(f"  {name:5s}: {tuned_scores[name]:.4f} (delta: {'+' if delta >= 0 else ''}{delta:.4f})")
+
+    best_single = max(tuned_scores, key=tuned_scores.get)
+    best_single_acc = tuned_scores[best_single]
+    print(f"  Best single: {best_single.upper()} = {best_single_acc:.4f}")
+
+    # ensemble top 3 TUNED models
+    print("\n  -- Phase 4: Ensemble (top 3 tuned) --")
+    top3 = sorted(tuned_scores, key=tuned_scores.get, reverse=True)[:3]
+    print(f"  Members: {[f'{n}({tuned_scores[n]:.4f})' for n in top3]}")
+
     def ens_fn():
         parts = []
-        if best_params:
-            parts.append((best_name, make_fn(best_name, best_params)()))
-        else:
-            parts.append((best_name, models[best_name]()))
         for n in top3:
-            if n != best_name:
+            if tuned_params[n]:
+                parts.append((n, make_fn(n, tuned_params[n])()))
+            else:
                 parts.append((n, models[n]()))
         return VotingClassifier(estimators=parts, voting='soft')
 
     ens_m, ens_s = cv_leakfree(ens_fn, df, skf, selected)
-    print(f"  ensemble: {ens_m:.4f} +/- {ens_s:.4f}")
-    use_ens = ens_m > best_tuned
+    print(f"  Ensemble: {ens_m:.4f} +/- {ens_s:.4f}")
 
-    # final
+    use_ens = ens_m > best_single_acc
+    if use_ens:
+        print(f"  -> ENSEMBLE wins (+{ens_m - best_single_acc:.4f} over {best_single.upper()})")
+    else:
+        print(f"  -> {best_single.upper()} wins (ensemble: {ens_m:.4f} < {best_single_acc:.4f})")
+
+    # final training on all data
     print("\n  -- Final --")
     df["label_int"] = ((df["label"] == "True") | (df["label"] == True)).astype(int)
     final = add_prestige(df, df)
@@ -360,10 +386,10 @@ def run_benchmark():
     if use_ens:
         print("  using ensemble")
         champ = ens_fn()
-    elif best_params:
-        champ = make_fn(best_name, best_params)()
+    elif tuned_params[best_single]:
+        champ = make_fn(best_single, tuned_params[best_single])()
     else:
-        champ = models[best_name]()
+        champ = models[best_single]()
 
     champ.fit(X_all, y_all)
     os.makedirs('/app/output', exist_ok=True)
