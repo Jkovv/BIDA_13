@@ -8,6 +8,7 @@ venv/
 # Large Model Files & Data
 imdb/ml-25m/
 imdb/ml-25m.zip
+imdb/tmdb_credits.csv
 *.pkl
 *.joblib
 processed/
