@@ -1,19 +1,20 @@
-## IMDB Movie Rating Classifier - Group 13
+# IMDB Movie Rating Classifier - Group 13
 
 Binary classification pipeline to predict whether a movie is highly rated on IMDB.
 
-**Validation accuracy: 88%** | [IMDB Leaderboard](http://big-data-competitions.westeurope.cloudapp.azure.com:8080/competitions/imdb)
+**Validation accuracy: 88.59%** | [IMDB Leaderboard](http://big-data-competitions.westeurope.cloudapp.azure.com:8080/competitions/imdb)
 
 ---
 
 ### Pipeline Overview
 
 ```
-cleaning.py     DuckDB   Raw CSVs → cleaned parquet (unicode fix, winsorization, log_votes, era, vote_density)
-prestige.py     Pandas   director/writer Bayesian prestige scores joined to parquet
-enrich.py       Pandas   IMDB title.basics + title.ratings genres joined via tconst (downloaded at runtime)
+cleaning.py     DuckDB   Raw CSVs → cleaned parquet (unicode fix, winsorization, log_votes, film_age, vote_density)
+prestige.py     Pandas   Director/writer Bayesian prestige scores (k=20), recomputed per CV fold in run.py
+enrich.py       Pandas   MovieLens 25M ratings + genres + genome tag features joined via tconst
 features.py     PySpark  TF-IDF on cleaned titles → feature parquet
-run.py          sklearn  Model competition (XGB/LGBM/CatBoost/RF/ADA) + grid search → predictions
+run.py          sklearn  4-stage feature selection + model competition (XGB/LGBM/CatBoost/RF/GBM) + grid search → predictions
+awards.py       Pandas   Oscar nominations/wins (not in pipeline — sparse coverage, kept for analysis)
 ```
 
 ### How to Run
@@ -36,10 +37,6 @@ docker run -it \
 
 Predictions are saved to `output/validation.txt` and `output/test.txt`.
 
-### Notes on Local CV Accuracy
-
-Local cross-validation shows ~98% accuracy, which is misleading. The prestige scores are computed on the full training set before CV runs, so validation fold labels leak into the prestige features. This is a known artifact - the actual server accuracy is ~79%. To evaluate locally without burning a submission slot, `run.py` prints a proxy score at the end using `title.ratings` (rating >= 7.0 matches server labels at ~79.6%) FOR NOW.
-
 ### Data
 
 Place the following files in the `imdb/` folder before running:
@@ -53,28 +50,42 @@ imdb/
   writing.json
 ```
 
-`title.basics.tsv.gz` (~200MB) and `title.ratings.tsv.gz` (~7MB) are downloaded automatically from IMDB on first run and cached after.
+MovieLens 25M (~262MB) is downloaded automatically on first run and cached after.
 
 ### Features Used
 
 | Feature | Source | Description |
 |---|---|---|
-| `log_votes` | train CSV | log1p(numVotes) - strongest signal |
-| `vote_density` | train CSV | votes / film age - cult classic detector |
-| `year` / `era_ord` | train CSV | release year + cinematic era bucket |
+| `log_votes` | train CSV | log1p(numVotes) |
 | `runtime` | train CSV | winsorized to [1, 210] min |
-| `director_prestige` | directing.json | Bayesian-smoothed director success rate (k=20) |
-| `writer_prestige` | writing.json | Bayesian-smoothed writer success rate (k=20) |
-| `genre_*` | IMDB title.basics | one-hot encoded top 10 genres |
+| `film_age` | train CSV | 2026 - release year |
+| `votes_x_runtime` | train CSV | interaction term |
+| `writer_prestige` | writing.json | Bayesian-smoothed writer label rate (k=20) |
+| `ml_rating_mean` | MovieLens 25M | mean user rating across 25M ratings |
+| `ml_rating_std` | MovieLens 25M | rating variance — polarizing films score lower |
+| `ml_log_count` | MovieLens 25M | log number of ratings |
+| `ml_tag_count` | MovieLens 25M | number of user tags |
+| `genre_*` | MovieLens 25M | one-hot genre flags (drama, horror, sci-fi, etc.) |
+| `genome_*` | MovieLens tag genome | continuous [0,1] relevance scores for 19 semantic tags |
 
-### The Project
+### Feature Selection Pipeline (run.py)
 
-* [IMDB Project](imdb/) - learn to identify highly rated movies
+Four-stage statistical selection before any model sees the data:
+1. **Mann-Whitney U + Benjamini-Hochberg FDR** (alpha=0.05) — univariate significance
+2. **Permutation mutual information + BH** (alpha=0.1) — nonlinear signal check
+3. **Partial Spearman** — drops interaction features redundant with their components
+4. **Spearman redundancy pruning** (|rho| > 0.85) — removes collinear features
 
-Consult the [project page on Canvas](https://canvas.uva.nl/courses/56576/pages/projects) for detailed instructions on the scope and grading of the projects.
+### Notes
+
+**Local CV accuracy (~88%) is trustworthy** — prestige scores are recomputed inside each CV fold so validation labels don't leak into the features.
+
+**Genome tag selection:** hand-picked 19 tags covering artistic merit, tone, and audience reception (boring, predictable, masterpiece, atmospheric, etc.). We also implemented data-driven selection via point-biserial correlation across all 1,128 genome tags (top 50 by |r|) — same validation accuracy, kept commented in `enrich.py` for reference.
+
+**Oscar awards:** attempted enrichment via `awards.py` (kaggle: unanimad/the-oscar-award). Title join only matched ~11% of training movies — too sparse to pass feature selection. Kept in repo as an example of a feature that failed the pipeline's statistical tests.
 
 ### Submitting predictions
 
-Each project contains two files `validation_hidden.csv` and `test_hidden.csv`, with the data for which your ML pipeline has to create predictions. In order to submit your predictions, you need to create two text files (one for the validation set and one for the test set). Each line in these files must consist of either the string `True` or the string `False`, which denote the predicted class for the corresponding data item in the validation or test files. 
+Each line in `output/validation.txt` and `output/test.txt` is either `True` or `False` for the corresponding row in the hidden CSV files.
 
-[submission server](http://big-data-competitions.westeurope.cloudapp.azure.com:8080/).
+[Submission server](http://big-data-competitions.westeurope.cloudapp.azure.com:8080/)
