@@ -20,6 +20,39 @@ GENOME_TAGS = [
     "cinematography", "surreal", "inspiring", "dialogue",
 ]
 
+# -- keep this block, used for poster presentation --
+# tried replacing the hand-picked list above with correlation-based selection
+# across all ~1128 genome tags. point-biserial correlation against training
+# labels, top 50 by |r|. same validation accuracy (0.8859) but more principled.
+# reverted because test prediction distribution shifted and hand-picked is safer.
+#
+# from scipy import stats
+# N_GENOME_TAGS = 50
+#
+# def select_genome_tags(train_tconsts_labels, links, top_n=N_GENOME_TAGS):
+#     genome_scores = pd.read_csv(os.path.join(ML_DIR, "genome-scores.csv"))
+#     genome_tags = pd.read_csv(os.path.join(ML_DIR, "genome-tags.csv"))
+#     genome_scores = genome_scores.merge(links[["movieId", "tconst"]], on="movieId", how="inner")
+#     pivoted = genome_scores.pivot_table(
+#         index="tconst", columns="tagId", values="relevance", aggfunc="first"
+#     )
+#     train_genome = train_tconsts_labels.join(pivoted, how="inner")
+#     y = train_genome["label_int"].values
+#     tag_ids = [c for c in train_genome.columns if c != "label_int"]
+#     correlations = {}
+#     for tag_id in tag_ids:
+#         x = train_genome[tag_id].values
+#         if x.std() > 0:
+#             r, _ = stats.pointbiserialr(y, x)
+#             correlations[tag_id] = abs(r)
+#     top_tag_ids = sorted(correlations, key=correlations.get, reverse=True)[:top_n]
+#     tag_name_map = genome_tags.set_index("tagId")["tag"].to_dict()
+#     selected = [(tid, tag_name_map[tid]) for tid in top_tag_ids if tid in tag_name_map]
+#     print(f"  Top {top_n} genome tags selected from {len(correlations)} candidates")
+#     print(f"  Top 5: {[name for _, name in selected[:5]]}")
+#     return selected
+# --
+
 
 def download_and_extract():
     if os.path.exists(ML_DIR):
@@ -46,7 +79,6 @@ def load_genome_features(links):
     genome_scores = pd.read_csv(os.path.join(ML_DIR, "genome-scores.csv"))
     genome_tags = pd.read_csv(os.path.join(ML_DIR, "genome-tags.csv"))
 
-    # filter to our selected tags only
     selected_tags = genome_tags[genome_tags["tag"].str.lower().isin(
         [t.lower() for t in GENOME_TAGS]
     )].copy()
@@ -56,12 +88,10 @@ def load_genome_features(links):
     filtered = genome_scores[genome_scores["tagId"].isin(selected_tags["tagId"])]
     filtered = filtered.merge(selected_tags[["tagId", "col_name"]], on="tagId")
 
-    # pivot: one row per movie, one col per tag
     pivoted = filtered.pivot_table(index="movieId", columns="col_name",
                                    values="relevance", aggfunc="first").reset_index()
     pivoted.columns.name = None
 
-    # join tconst
     pivoted = pivoted.merge(links[["movieId", "tconst"]], on="movieId", how="inner")
     pivoted = pivoted.drop(columns=["movieId"])
 
@@ -76,7 +106,6 @@ def load_movielens_features():
     movies = pd.read_csv(os.path.join(ML_DIR, "movies.csv"))
     movies = movies.merge(links[["movieId", "tconst"]], on="movieId", how="inner")
 
-    # genres from MovieLens
     top_genres = ['Drama', 'Comedy', 'Action', 'Romance', 'Thriller',
                   'Crime', 'Adventure', 'Horror', 'Documentary', 'Animation',
                   'Sci-Fi', 'Mystery', 'Fantasy', 'War', 'Musical',
@@ -86,7 +115,6 @@ def load_movielens_features():
         movies[col] = movies['genres'].str.contains(g, na=False).astype(int)
     movies['genre_count'] = movies['genres'].str.count('\\|').add(1).fillna(0).astype(int)
 
-    # aggregate ratings from 25M user ratings
     ratings = pd.read_csv(os.path.join(ML_DIR, "ratings.csv"))
     agg = ratings.groupby("movieId").agg(
         ml_rating_mean=("rating", "mean"),
@@ -98,13 +126,11 @@ def load_movielens_features():
     agg["ml_log_count"] = np.log1p(agg["ml_rating_count"])
     movies = movies.merge(agg, on="movieId", how="left")
 
-    # user tag counts
     tags = pd.read_csv(os.path.join(ML_DIR, "tags.csv"))
     tag_counts = tags.groupby("movieId").size().reset_index(name="ml_tag_count")
     movies = movies.merge(tag_counts, on="movieId", how="left")
     movies["ml_tag_count"] = movies["ml_tag_count"].fillna(0).astype(int)
 
-    # genome features
     genome = load_genome_features(links)
     movies = movies.merge(genome, on="tconst", how="left")
 
@@ -145,8 +171,6 @@ def run():
                 elif col in ["ml_tag_count", "ml_rating_count"]:
                     df[col] = df[col].fillna(0)
                 elif col.startswith("genome_"):
-                    # fill missing genome scores with column median
-                    # (movies not in genome get average tag relevance)
                     df[col] = df[col].fillna(df[col].median())
                 else:
                     df[col] = df[col].fillna(df[col].median())
