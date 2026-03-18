@@ -2,7 +2,7 @@
 
 Binary classification pipeline to predict whether a movie is highly rated on IMDB.
 
-**Validation accuracy: 91.10%** | [IMDB Leaderboard](http://big-data-competitions.westeurope.cloudapp.azure.com:8080/competitions/imdb)
+**Validation accuracy: 91.31%** | [IMDB Leaderboard](http://big-data-competitions.westeurope.cloudapp.azure.com:8080/competitions/imdb)
 
 ---
 
@@ -13,7 +13,7 @@ cleaning.py     DuckDB   Raw CSVs -> cleaned parquet (unicode fix, winsorization
 prestige.py     Pandas   Director/writer Bayesian prestige scores (k=20), recomputed per CV fold in run.py
 enrich.py       Pandas   MovieLens 25M ratings + genres + tag relevance (19 hand-picked + 30 PCA components)
 features.py     PySpark  TF-IDF on cleaned titles, extracts top 50 dimensions as numeric columns
-run.py          sklearn  4-stage feature selection + model competition (RF/ET + others) + grid search -> predictions
+run.py          sklearn  4-stage feature selection + model competition (RF/ET) + threshold tuning -> predictions
 ```
 
 Not in pipeline (kept for analysis):
@@ -105,22 +105,25 @@ Four-stage nonparametric statistical selection runs before any model sees the da
 | Score | What changed |
 |---|---|
 | 73.2% | Baseline with basic features |
-| 79.2% | Director/writer prestige scores + MovieLens genres |
+| 79.2% | Director/writer Bayesian prestige scores + MovieLens genres |
 | 88.6% | MovieLens tag genome (mltag_boring, mltag_predictable strongest signals) |
-| 88.9% | PCA on all 1,128 genome tags added 26 statistically significant components |
-| 91.1% | ExtraTrees replaced Random Forest as champion model + TF-IDF fix |
+| 88.9% | PCA on all 1,128 genome tags -- 26/30 components survived feature selection |
+| 91.1% | ExtraTrees replaced Random Forest as champion model + TF-IDF extraction fixed |
+| 91.3% | Decision threshold tuned to 0.46 on OOF probabilities (was 0.5 default) |
 
 ---
 
 ### Notes
 
-**Local CV (~88-89%) is trustworthy** -- prestige scores are recomputed inside each CV fold so validation labels never leak into the prestige features.
+**Local CV (~89%) is trustworthy** -- prestige scores are recomputed inside each CV fold so validation labels never leak into the prestige features.
 
 **Tag genome features:** MovieLens assigns continuous [0,1] relevance scores per movie across ~1,128 user-generated tags. We use these two ways: 19 hand-picked interpretable tags (mltag_boring, mltag_predictable, mltag_masterpiece, etc.) plus PCA on the full 1,128-tag matrix (30 components, 26 survived feature selection). The PCA components capture quality patterns across tags that no single tag captures alone -- mltag_pc_0 had MI=0.177, as strong as mltag_boring.
 
-**TF-IDF fix:** features.py previously computed a PySpark sparse vector that prepare() in run.py never extracted into the feature matrix. Fixed to extract the top 50 most informative dimensions as individual numeric columns. Most failed feature selection (title text is weak signal on 2-4 word movie titles) but a few borderline ones survived.
+**TF-IDF fix:** features.py previously computed a PySpark sparse vector that prepare() in run.py never extracted into the feature matrix. Fixed to extract the top 50 most informative dimensions as individual numeric columns. Most fail feature selection (title text is weak signal on 2-4 word movie titles) but the extraction is now correct.
 
-**Why ExtraTrees beats Random Forest here:** ET randomizes split thresholds rather than searching for the optimal split at each node. With 60+ features including many correlated PCA components and tag scores, this extra randomness reduces overfitting and increases tree diversity within the ensemble. ET scored 0.8907 vs RF's 0.8864 in cross-validation.
+**Why ExtraTrees beats Random Forest here:** ET randomizes split thresholds rather than searching for the optimal split at each node. With 60+ features including many correlated PCA components and tag scores, this extra randomness reduces overfitting and increases tree diversity within the ensemble.
+
+**Threshold tuning:** after model selection, we collect out-of-fold probabilities from the champion model and sweep thresholds from 0.30 to 0.70 to find the one maximizing OOF accuracy. ET's default threshold of 0.5 gave 0.8914 OOF, while 0.46 gave 0.8937 -- the model is slightly conservative by default. This +0.0023 local improvement translated to +0.002 on the server (91.1% -> 91.3%).
 
 **Data-driven tag selection (commented out in enrich.py):** we also implemented correlation-based selection across all 1,128 tags using point-biserial correlation against training labels, top 50 by absolute r. Produced the same 88.59% server score as the hand-picked 19 but is more principled -- kept commented for reference.
 
