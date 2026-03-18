@@ -123,7 +123,7 @@ Four-stage nonparametric statistical selection runs before any model sees the da
 
 **Why ExtraTrees beats Random Forest here:** ET randomizes split thresholds rather than searching for the optimal split at each node. With 60+ features including many correlated PCA components and tag scores, this extra randomness reduces overfitting and increases tree diversity within the ensemble.
 
-**Threshold tuning:** after model selection, we collect out-of-fold probabilities from the champion model and sweep thresholds from 0.30 to 0.70 to find the one maximizing OOF accuracy. ET's default threshold of 0.5 gave 0.8914 OOF, while 0.46 gave 0.8937 -- the model is slightly conservative by default. This +0.0023 local improvement translated to +0.002 on the server (91.1% -> 91.3%).
+**Threshold tuning:** after model selection, we collect out-of-fold probabilities from the champion model and sweep thresholds from 0.30 to 0.70 to find the one maximizing OOF accuracy. ET's default threshold of 0.5 gave 0.8914 OOF, while 0.46 gave 0.8937 -- the model is slightly conservative by default. This translated to +0.002 on the server (91.1% -> 91.3%).
 
 **Data-driven tag selection (commented out in enrich.py):** we also implemented correlation-based selection across all 1,128 tags using point-biserial correlation against training labels, top 50 by absolute r. Produced the same 88.59% server score as the hand-picked 19 but is more principled -- kept commented for reference.
 
@@ -134,6 +134,7 @@ Four-stage nonparametric statistical selection runs before any model sees the da
 - TMDB metadata (budget, revenue, popularity, original_language): budget missing for ~31% of movies. All four features failed permutation MI.
 - Stacking (meta-learner): logistic regression on out-of-fold probabilities from all base models collapsed to ET/RF-dominant weights, models not diverse enough for stacking to add value.
 - Bechdel test (bechdeltest.com): API returned 410 Gone during the project period, zero matches.
+- PageRank on director-writer-movie graph: built a bipartite graph from directing.json and writing.json and computed PageRank centrality per director, writer, and movie. dir_pagerank and wri_pagerank were highly correlated with the existing Bayesian prestige scores (rho > 0.85) and got pruned in the Spearman redundancy step -- the two features capture the same underlying signal about director/writer quality.
 
 These failures are documented in the repo (`awards.py`, `prestige_lists.py`, `loyalty.py`) as examples of features that the pipeline's statistical gatekeeping correctly rejected.
 
