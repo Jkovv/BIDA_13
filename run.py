@@ -1,5 +1,5 @@
 import warnings
-warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
+warnings.filterwarnings("ignore")
 
 import joblib, json, os, random
 import pandas as pd
@@ -231,9 +231,11 @@ def prepare(df, selected=None):
 
 # -- leak-free CV --
 
-def cv_leakfree(clf_fn, df, skf, selected=None):
+def cv_leakfree(clf_fn, df, skf, selected=None, return_oof=False):
     y_all = LabelEncoder().fit_transform(df["label"].astype(str))
     accs = []
+    oof_probs = np.zeros(len(df))
+    oof_labels = np.zeros(len(df))
     for tr_idx, val_idx in skf.split(np.arange(len(df)), y_all):
         tr = df.iloc[tr_idx].copy().reset_index(drop=True)
         va = df.iloc[val_idx].copy().reset_index(drop=True)
@@ -246,6 +248,12 @@ def cv_leakfree(clf_fn, df, skf, selected=None):
         clf = clf_fn()
         clf.fit(X_tr, y_tr)
         accs.append(accuracy_score(y_va, clf.predict(X_va)))
+        if return_oof:
+            probs = clf.predict_proba(X_va)[:, 1]
+            oof_probs[val_idx] = probs
+            oof_labels[val_idx] = y_va
+    if return_oof:
+        return np.mean(accs), np.std(accs), oof_probs, oof_labels
     return np.mean(accs), np.std(accs)
 
 
@@ -370,7 +378,9 @@ def run_benchmark():
                 parts.append((n, make_fn(n, tuned_params[n])()))
             else:
                 parts.append((n, models[n]()))
-        return VotingClassifier(estimators=parts, voting='soft')
+        # weight by CV score so stronger models drive the prediction
+        weights = [tuned_scores[n] for n in top3]
+        return VotingClassifier(estimators=parts, voting='soft', weights=weights)
 
     ens_m, ens_s = cv_leakfree(ens_fn, df, skf, selected)
     print(f"  Ensemble: {ens_m:.4f} +/- {ens_s:.4f}")
@@ -381,6 +391,24 @@ def run_benchmark():
     else:
         print(f"  -> {best_single.upper()} wins (ensemble: {ens_m:.4f} < {best_single_acc:.4f})")
 
+    # threshold tuning on OOF probabilities from the champion model
+    print("\n  -- Phase 5: Threshold tuning --")
+    if use_ens:
+        champ_fn = ens_fn
+    elif tuned_params[best_single]:
+        champ_fn = make_fn(best_single, tuned_params[best_single])
+    else:
+        champ_fn = models[best_single]
+
+    _, _, oof_probs, oof_labels = cv_leakfree(champ_fn, df, skf, selected, return_oof=True)
+    best_thresh, best_thresh_acc = 0.5, 0.0
+    for t in np.arange(0.3, 0.71, 0.01):
+        acc = accuracy_score(oof_labels, (oof_probs >= t).astype(int))
+        if acc > best_thresh_acc:
+            best_thresh_acc, best_thresh = acc, t
+    print(f"  OOF accuracy at 0.5:  {accuracy_score(oof_labels, (oof_probs >= 0.5).astype(int)):.4f}")
+    print(f"  Best threshold: {best_thresh:.2f} -> {best_thresh_acc:.4f}")
+
     # final training on all data
     print("\n  -- Final --")
     df["label_int"] = ((df["label"] == "True") | (df["label"] == True)).astype(int)
@@ -388,6 +416,7 @@ def run_benchmark():
     final = final.drop(columns=["label_int"], errors="ignore")
     X_all, y_all = prepare(final, selected)
     print(f"  {X_all.shape[1]} features: {list(X_all.columns)}")
+    print(f"  threshold: {best_thresh:.2f}")
 
     if use_ens:
         print("  using ensemble")
@@ -411,7 +440,8 @@ def run_benchmark():
         merged = order.merge(feats, on='tconst', how='left')
         merged = add_prestige(df, merged)
         X_eval, _ = prepare(merged, selected)
-        preds = champ.predict(X_eval)
+        probs = champ.predict_proba(X_eval)[:, 1]
+        preds = (probs >= best_thresh).astype(int)
         with open(f"/app/output/{split}.txt", "w") as f:
             for p in preds:
                 f.write(f"{bool(p)}\n")
