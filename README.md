@@ -47,7 +47,7 @@ The raw training data has every movie duplicated 3x across the CSV files — we 
 We enrich every movie with features from **MovieLens 25M** (GroupLens, University of Minnesota) — this is NOT IMDB data, it's a completely separate user base with independent ratings.
 
 **What we extract:**
-* **Rating aggregates:** mean, std, median, count, log_count, tag_count — captures both quality and popularity from a different audience than IMDB.
+* **Rating aggregates:** mean, std, median, count, log_count, tag_count - captures both quality and popularity from a different audience than IMDB.
 * **19 genre flags** from MovieLens genre tags (Drama, Comedy, Horror, etc.) plus a genre_count feature.
 * **19 hand-picked tag relevance scores:** MovieLens assigns continuous [0,1] relevance to ~1,128 user-generated tags per movie. We pick tags relevant to quality perception: `boring`, `predictable`, `masterpiece`, `atmospheric`, `cinematography`, `thought-provoking`, etc. These turned out to be the single biggest accuracy boost (+9%).
 * **30 PCA components** on the full 1,128-tag matrix: captures cross-tag patterns that no individual tag captures alone. `mltag_pc_0` had MI=0.177, as strong as `mltag_boring`.
@@ -60,11 +60,11 @@ We also attempt to download **Bechdel Test** scores from bechdeltest.com (female
 
 With ~70 candidate features on only 8k movies, aggressive selection is essential. We use a 4-stage nonparametric pipeline — no normality assumptions anywhere:
 
-1. **Mann-Whitney U + Benjamini-Hochberg** (FDR α=0.05) — tests whether feature distributions differ between True/False classes. BH correction prevents false discoveries across 70+ simultaneous tests.
+1. **Mann-Whitney U + Benjamini-Hochberg** (FDR α=0.05) - tests whether feature distributions differ between True/False classes. BH correction prevents false discoveries across 70+ simultaneous tests.
 
-2. **Permutation Mutual Information + BH** (FDR α=0.10) — computes real MI, then shuffles labels 100 times to build a null distribution. A feature only passes if its MI significantly exceeds what you'd get by chance. This is the strictest gate — most genres and all TF-IDF dimensions fail here.
+2. **Permutation Mutual Information + BH** (FDR α=0.10) - computes real MI, then shuffles labels 100 times to build a null distribution. A feature only passes if its MI significantly exceeds what you'd get by chance. This is the strictest gate - most genres and all TF-IDF dimensions fail here.
 
-3. **Partial Spearman** — for features we know are derived from others (like `votes_x_runtime` from `log_votes` × `runtime`), tests whether the derived feature adds conditional signal beyond its components. This caught `votes_per_minute` as fully redundant.
+3. **Partial Spearman** - for features we know are derived from others (like `votes_x_runtime` from `log_votes` × `runtime`), tests whether the derived feature adds conditional signal beyond its components. This caught `votes_per_minute` as fully redundant.
 
 4. **Spearman Redundancy Pruning** (|ρ| > 0.85) — pairwise rank correlation between surviving features. If two are too correlated, drop the one with lower MI. This is why `director_prestige` gets dropped (ρ=0.851 with `writer_prestige`).
 
