@@ -38,7 +38,7 @@ The raw training data has every movie duplicated 3x across the CSV files — we 
 * **Missing years (~10%):** imputed via `COALESCE(startYear, endYear)`, remaining NULLs left as-is.
 * **Extreme runtimes:** winsorized to [1, 210] minutes using `LEAST(GREATEST(...))` in DuckDB. A handful of movies had runtimes over 5000 min.
 * **Missing votes (~10%):** imputed with decade-median using `MEDIAN() OVER (PARTITION BY decade)` window function.
-* **Derived features** computed in DuckDB: `log_votes`, `film_age` (2026 − year), `votes_per_minute`, `runtime_short` (< 90 min flag), `votes_x_runtime` (interaction), `is_foreign` (originalTitle ≠ primaryTitle).
+* **Derived features** computed in DuckDB: `log_votes`, `film_age` (2026 - year), `votes_per_minute`, `runtime_short` (< 90 min flag), `votes_x_runtime` (interaction), `is_foreign` (originalTitle ≠ primaryTitle).
 
 ---
 
@@ -66,7 +66,7 @@ With ~70 candidate features on only 8k movies, aggressive selection is essential
 
 3. **Partial Spearman** - for features we know are derived from others (like `votes_x_runtime` from `log_votes` × `runtime`), tests whether the derived feature adds conditional signal beyond its components. This caught `votes_per_minute` as fully redundant.
 
-4. **Spearman Redundancy Pruning** (|ρ| > 0.85) — pairwise rank correlation between surviving features. If two are too correlated, drop the one with lower MI. This is why `director_prestige` gets dropped (ρ=0.851 with `writer_prestige`).
+4. **Spearman Redundancy Pruning** (|ρ| > 0.85) - pairwise rank correlation between surviving features. If two are too correlated, drop the one with lower MI. This is why `director_prestige` gets dropped (ρ=0.851 with `writer_prestige`).
 
 Typically ~60 features enter and ~35 survive. The exact set varies slightly between runs due to MI permutation randomness.
 
@@ -90,9 +90,9 @@ We tested six models across many runs: XGBoost, LightGBM, CatBoost, Random Fores
 
 **ExtraTrees won every single run**, beating RF by ~2% consistently. ET randomizes split thresholds rather than optimizing them, which provides better regularization when dealing with 60+ features including many correlated PCA components.
 
-**Optuna tuning** (80 TPE trials) searches over: `n_estimators` [300–1500], `max_depth` [10–24 or None], `min_samples_leaf` [1–5], `max_features` [sqrt, log2, 0.3–0.7]. Most reasonable configs give ~89% CV, but Optuna finds marginally better combos than random search.
+**Optuna tuning** (80 TPE trials) searches over: `n_estimators` [300-1500], `max_depth` [10-24 or None], `min_samples_leaf` [1–5], `max_features` [sqrt, log2, 0.3–0.7]. Most reasonable configs give ~89% CV, but Optuna finds marginally better combos than random search.
 
-**Threshold tuning:** ET's default 0.5 probability threshold is slightly conservative. We sweep out-of-fold probabilities from 0.30 to 0.70 and usually land around 0.44–0.48. This gave +0.2% on the server (91.1% → 91.3%).
+**Threshold tuning:** ET's default 0.5 probability threshold is slightly conservative. We sweep out-of-fold probabilities from 0.30 to 0.70 and usually land around 0.44-0.48. This gave +0.2% on the server (91.1% → 91.3%).
 
 ---
 
@@ -102,8 +102,8 @@ We tested six models across many runs: XGBoost, LightGBM, CatBoost, Random Fores
 |:---|:---|:---|
 | 73.2% | — | Baseline: runtime + votes only |
 | 79.2% | — | Added Bayesian prestige + MovieLens genres |
-| 88.6% | 88.59% | MovieLens tag genome — boring and predictable were the strongest signals |
-| 88.9% | 88.90% | PCA on all 1,128 tags — 26/30 components survived selection |
+| 88.6% | 88.59% | MovieLens tag genome - boring and predictable were the strongest signals |
+| 88.9% | 88.90% | PCA on all 1,128 tags - 26/30 components survived selection |
 | 89.1% | 91.10% | Switched from Random Forest to ExtraTrees |
 | 89.37% | 91.31% | Threshold tuning on OOF probabilities (0.46 instead of 0.5) |
 | **89.84%** | **91.31%** | Optuna-tuned ET (80 trials), 60 features |
@@ -122,7 +122,7 @@ We ran a lot of experiments. Here's everything that didn't make the final pipeli
 
 **Criterion Collection** (`prestige_lists.py`): from Kaggle (shankhadeepmaiti). 3.4% match rate. Too sparse.
 
-**TMDB Budget/Revenue**: from Kaggle (rounakbanik/the-movies-dataset). Budget missing for ~31% of movies. Even with the filled values, all four features (budget, revenue, popularity, original_language) failed permutation MI. We also tried inflation-adjusting by decade — the missing data problem is the bottleneck, not the scale.
+**TMDB Budget/Revenue**: from Kaggle (rounakbanik/the-movies-dataset). Budget missing for ~31% of movies. Even with the filled values, all four features (budget, revenue, popularity, original_language) failed permutation MI. We also tried inflation-adjusting by decade - the missing data problem is the bottleneck, not the scale.
 
 **Director-DP Loyalty** (`loyalty.py`): built from TMDB credits. Counted prior collaborations between a director and their cinematographer. The Scorsese–Ballhaus type signal is real, but only 10% of movies had prior collaborations. Failed MI.
 
@@ -152,7 +152,7 @@ All failed experiments are documented in the repo with comments explaining why t
 
 **Why not Spark for everything?** On 8k movies, Spark's overhead isn't justified. DuckDB is faster for SQL-style work, pandas is more readable for join-heavy enrichment.
 
-**Why hand-pick tags AND use PCA?** The 19 hand-picked tags pass all 4 statistical tests independently. They're not cherry-picked guesses — they're validated by the same pipeline. PCA components and individual tags aren't redundant (no tag correlates > 0.85 with any single component), so the model gets both direct signal (`mltag_boring = 0.92`) and decomposed patterns (`mltag_pc_0`). Removing the hand-picked tags drops server accuracy by ~0.3%.
+**Why hand-pick tags AND use PCA?** The 19 hand-picked tags pass all 4 statistical tests independently. They're not cherry-picked guesses - they're validated by the same pipeline. PCA components and individual tags aren't redundant (no tag correlates > 0.85 with any single component), so the model gets both direct signal (`mltag_boring = 0.92`) and decomposed patterns (`mltag_pc_0`). Removing the hand-picked tags drops server accuracy by ~0.3%.
 
 ---
 
