@@ -13,7 +13,7 @@ This project implements a high-performance binary classification pipeline to pre
 
 The pipeline is distributed across specialized modules to ensure efficiency and scalability:
 
-* [cite_start]**`cleaning.py` (DuckDB):** Handles heavy lifting for data ingestion[cite: 2]. [cite_start]It performs unicode normalization (`ftfy`), winsorization of runtime and votes, and median imputation of missing values partitioned by decade[cite: 2].
+* **`cleaning.py` (DuckDB):** Handles heavy lifting for data ingestion. It performs unicode normalization (`ftfy`), winsorization of runtime and votes, and median imputation of missing values partitioned by decade.
 * **`prestige.py` (Pandas):** Generates Bayesian-smoothed prestige scores for directors and writers ($k=20$). Note that `run.py` recomputes these within each CV fold to prevent label leakage.
 * **`enrich.py` (Pandas):** Integrates MovieLens 25M ratings and tag genome data. It extracts 19 hand-picked semantic tags and 30 PCA components from the 1,128-tag genome matrix to capture latent quality signals.
 * **`features.py` (PySpark):** Uses Spark to process movie titles through a TF-IDF pipeline, extracting the top 50 most informative dimensions as numeric features.
@@ -41,7 +41,7 @@ To prevent overfitting on an 8k movie dataset, all features must pass a rigorous
 | 88.6% | MovieLens Tag Genome (19 hand-picked tags) | 88.59% |
 | 89.1% | ExtraTrees (ET) + Fixed TF-IDF Extraction | 91.10% |
 | 89.37% | ET + Threshold Tuning (0.46) | 91.31% |
-| **0.8984** | **Final: Optuna Optimized ET (500 est, depth 16) + 60 Features** | **TBD** |
+| **0.8984** | **Final: Optuna Optimized ET (500 est, depth 16) + 60 Features** | 91.31% |
 
 ---
 
