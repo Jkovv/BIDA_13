@@ -12,3 +12,4 @@ scikit-learn
 ftfy
 scipy
 openpyxl
+optuna

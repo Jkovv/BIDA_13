@@ -15,6 +15,7 @@ from sklearn.ensemble import (RandomForestClassifier, GradientBoostingClassifier
 from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
 from catboost import CatBoostClassifier
+import optuna
 
 
 # -- prestige (recomputed per CV fold) --
@@ -76,7 +77,6 @@ def add_prestige(train_df, target_df):
 # -- statistical feature selection --
 
 def _bh_correction(pvals, alpha):
-    """Benjamini-Hochberg FDR correction. returns (reject, adjusted_pvals)"""
     n = len(pvals)
     idx = np.argsort(pvals)
     sorted_p = np.array(pvals)[idx]
@@ -90,8 +90,6 @@ def _bh_correction(pvals, alpha):
 
 
 def _partial_spearman(X, feat, controls, y_col='label_int'):
-    """Spearman partial correlation: does feat correlate with label
-    after removing linear effect of controls? uses ranks for nonparametric."""
     ranked = X[[feat] + controls + [y_col]].rank()
     lr_x = LinearRegression().fit(ranked[controls], ranked[feat])
     lr_y = LinearRegression().fit(ranked[controls], ranked[y_col])
@@ -101,17 +99,9 @@ def _partial_spearman(X, feat, controls, y_col='label_int'):
 
 
 def select_features(X, y, cols, n_perms=100, mw_alpha=0.05, mi_alpha=0.1, corr_thresh=0.85):
-    """Feature selection pipeline:
-    1) Mann-Whitney U with BH FDR correction (nonparametric, no normality assumption)
-    2) Permutation MI with BH correction (real MI vs null from shuffled labels)
-    3) Partial Spearman (interaction features only add value if they have
-       signal beyond their components)
-    4) Spearman redundancy (drop near-duplicates)"""
-
     data = X.copy()
     data['label_int'] = y
 
-    # 1. Mann-Whitney U
     print("\n  1) Mann-Whitney U + Benjamini-Hochberg (alpha=0.05)")
     mw_pvals, mw_effects = [], []
     for c in cols:
@@ -120,12 +110,10 @@ def select_features(X, y, cols, n_perms=100, mw_alpha=0.05, mi_alpha=0.1, corr_t
         mw_effects.append(1 - (2 * U) / (sum(y==0) * sum(y==1)))
 
     mw_reject, mw_padj = _bh_correction(mw_pvals, mw_alpha)
-
     print(f"     {'feature':25s} {'effect_r':>9} {'p_adj':>10} {'sig':>4}")
     for i, c in enumerate(cols):
         print(f"     {c:25s} {mw_effects[i]:9.4f} {mw_padj[i]:10.2e} {'*' if mw_reject[i] else '':>4}")
 
-    # 2. Permutation MI
     print(f"\n  2) Permutation MI ({n_perms} shuffles) + BH (alpha=0.1)")
     real_mi = mutual_info_classif(X[cols], y, random_state=42, n_neighbors=5)
     rng = np.random.RandomState(42)
@@ -141,15 +129,12 @@ def select_features(X, y, cols, n_perms=100, mw_alpha=0.05, mi_alpha=0.1, corr_t
     for j, c in enumerate(cols):
         print(f"     {c:25s} {real_mi[j]:7.4f} {np.percentile(null_mis[:,j], 95):8.4f} {mi_padj[j]:8.3f} {'*' if mi_reject[j] else '':>4}")
 
-    # combine: must pass both
     candidates = [c for i, c in enumerate(cols) if mw_reject[i] and mi_reject[i]]
     dropped = [c for c in cols if c not in candidates]
     if dropped:
         print(f"\n  Dropped (failed tests): {dropped}")
     print(f"  Passed: {candidates}")
 
-    # 3. Partial Spearman for interaction/derived features
-    # tests if a feature adds signal beyond its source features
     interaction_tests = [
         ('votes_x_runtime', ['log_votes', 'runtime']),
         ('vote_density', ['log_votes', 'film_age']),
@@ -178,7 +163,6 @@ def select_features(X, y, cols, n_perms=100, mw_alpha=0.05, mi_alpha=0.1, corr_t
 
     candidates = [c for c in candidates if c not in partial_drops]
 
-    # 4. Spearman redundancy
     if len(candidates) > 1:
         corr = X[candidates].corr(method='spearman')
         to_drop = set()
@@ -207,10 +191,8 @@ def prepare(df, selected=None):
     num = ["runtime", "log_votes", "film_age", "vote_density", "votes_per_minute",
            "runtime_short", "runtime_long", "votes_x_runtime", "is_foreign",
            "director_prestige", "writer_prestige", "n_directors", "n_writers",
-           # movielens aggregate
            "ml_rating_mean", "ml_rating_std", "ml_rating_count",
            "ml_rating_median", "ml_log_count", "ml_tag_count",
-           # bechdel
            "bechdel_score", "bechdel_pass"]
     genre = [c for c in df.columns if c.startswith("genre_")]
     mltag = [c for c in df.columns if c.startswith("mltag_")]
@@ -278,138 +260,72 @@ def run_benchmark():
     selected = select_features(X_tmp, y_tmp, list(X_tmp.columns))
     df = df.drop(columns=["label_int"])
 
-    # models
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+    # all models listed for reference, only ET is active
     models = {
         # 'xgb':  lambda: XGBClassifier(n_estimators=300, max_depth=4, learning_rate=0.05,
         #                                random_state=42, eval_metric='logloss'),
         # 'lgbm': lambda: LGBMClassifier(n_estimators=300, max_depth=4, random_state=42, verbose=-1),
         # 'cat':  lambda: CatBoostClassifier(iterations=300, depth=4, verbose=False, random_seed=42),
-        'rf':   lambda: RandomForestClassifier(n_estimators=200, max_depth=12, random_state=42, n_jobs=-1),
+        # 'rf':   lambda: RandomForestClassifier(n_estimators=200, max_depth=12, random_state=42, n_jobs=-1),
         # 'gbm':  lambda: GradientBoostingClassifier(n_estimators=300, max_depth=4, learning_rate=0.05,
         #                                             random_state=42),
         'et':   lambda: ExtraTreesClassifier(n_estimators=500, max_depth=16, random_state=42, n_jobs=-1),
     }
 
-    scores = {}
-    print("\n  -- Phase 1: Defaults (quick screening) --")
-    for name, fn in models.items():
-        m, s = cv_leakfree(fn, df, skf, selected)
-        scores[name] = m
-        print(f"  {name:5s}: {m:.4f} +/- {s:.4f}")
+    print("\n  -- Phase 1: ET default --")
+    default_fn = models['et']
+    default_m, default_s = cv_leakfree(default_fn, df, skf, selected)
+    print(f"  et   : {default_m:.4f} +/- {default_s:.4f}")
 
-    # tune ALL models, not just the winner
-    grids = {
-        'xgb': [{'n_estimators': n, 'max_depth': d, 'learning_rate': lr,
-                  'subsample': ss, 'colsample_bytree': cs, 'eval_metric': 'logloss'}
-                for n in [300, 500, 800] for d in [3, 4, 5, 6]
-                for lr in [0.02, 0.05, 0.1] for ss in [0.8, 1.0] for cs in [0.8, 1.0]],
-        'lgbm': [{'n_estimators': n, 'max_depth': d, 'learning_rate': lr,
-                   'num_leaves': nl, 'subsample': ss}
-                 for n in [300, 500, 800] for d in [4, 6, 8]
-                 for lr in [0.02, 0.05, 0.1] for nl in [31, 63] for ss in [0.8, 1.0]],
-        'cat': [{'iterations': n, 'depth': d, 'learning_rate': lr, 'l2_leaf_reg': l2}
-                for n in [300, 500, 800] for d in [4, 6, 8]
-                for lr in [0.02, 0.05, 0.1] for l2 in [1, 3, 5]],
-        'rf':  [{'n_estimators': n, 'max_depth': d, 'min_samples_leaf': ml, 'max_features': mf}
-                for n in [200, 400, 600, 800, 1000] for d in [8, 12, 16, 20, 24, None]
-                for ml in [1, 2, 3, 5] for mf in ['sqrt', 'log2', 0.5, 0.7, None]],
-        'gbm': [{'n_estimators': n, 'max_depth': d, 'learning_rate': lr, 'subsample': ss}
-                for n in [300, 500, 800] for d in [3, 4, 5]
-                for lr in [0.02, 0.05, 0.1] for ss in [0.8, 1.0]],
-        'et':  [{'n_estimators': n, 'max_depth': d, 'min_samples_leaf': ml, 'max_features': mf}
-                for n in [400, 600, 800, 1000] for d in [12, 16, 20, 24, None]
-                for ml in [1, 2, 3] for mf in ['sqrt', 'log2', 0.5, 0.7]],
-    }
-    def make_fn(name, params):
-        ctors = {
-            'xgb':  lambda: XGBClassifier(random_state=42, **params),
-            'lgbm': lambda: LGBMClassifier(random_state=42, verbose=-1, **params),
-            'cat':  lambda: CatBoostClassifier(verbose=False, random_seed=42, **params),
-            'rf':   lambda: RandomForestClassifier(random_state=42, n_jobs=-1, **params),
-            'gbm':  lambda: GradientBoostingClassifier(random_state=42, **params),
-            'et':   lambda: ExtraTreesClassifier(random_state=42, n_jobs=-1, **params),
+    # -- Phase 2: Optuna tuning --
+    print("\n  -- Phase 2: Optuna ET tuning (80 trials) --")
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    def objective(trial):
+        params = {
+            'n_estimators': trial.suggest_int('n_estimators', 300, 1500, step=100),
+            'max_depth': trial.suggest_categorical('max_depth', [10, 12, 14, 16, 18, 20, 24, None]),
+            'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 5),
+            'max_features': trial.suggest_categorical('max_features',
+                            ['sqrt', 'log2', 0.3, 0.4, 0.5, 0.6, 0.7]),
         }
-        return ctors[name]
+        fn = lambda: ExtraTreesClassifier(random_state=42, n_jobs=-1, **params)
+        m, s = cv_leakfree(fn, df, skf, selected)
+        print(f"    [{trial.number+1}] {m:.4f}  {params}")
+        return m
 
-    print("\n  -- Phase 2: Tuning ALL models --")
-    tuned_params = {}
-    tuned_scores = {}
+    study = optuna.create_study(direction='maximize',
+                                sampler=optuna.samplers.TPESampler(seed=42))
+    study.optimize(objective, n_trials=80)
 
-    for model_name in models.keys():
-        print(f"\n  {model_name.upper()} (default: {scores[model_name]:.4f}):")
-        random.seed(42)
-        n_samples = min(20, len(grids[model_name]))
-        sample = random.sample(grids[model_name], n_samples)
-        best_p, best_s = None, scores[model_name]
+    best_params = study.best_params
+    best_score = study.best_value
+    print(f"\n  Optuna best: {best_score:.4f}  {best_params}")
 
-        for i, p in enumerate(sample):
-            fn = make_fn(model_name, p)
-            m, s = cv_leakfree(fn, df, skf, selected)
-            flag = " ***" if m > best_s else ""
-            print(f"    [{i+1}/{n_samples}] {m:.4f}{flag}  {p}")
-            if m > best_s:
-                best_s, best_p = m, p
-
-        tuned_params[model_name] = best_p
-        tuned_scores[model_name] = best_s
-        status = f"tuned to {best_s:.4f}" if best_p else f"default was best ({best_s:.4f})"
-        print(f"    -> {status}")
-
-    # compare all tuned models
-    print("\n  -- Phase 3: Tuned comparison --")
-    for name in sorted(tuned_scores, key=tuned_scores.get, reverse=True):
-        delta = tuned_scores[name] - scores[name]
-        print(f"  {name:5s}: {tuned_scores[name]:.4f} (delta: {'+' if delta >= 0 else ''}{delta:.4f})")
-
-    best_single = max(tuned_scores, key=tuned_scores.get)
-    best_single_acc = tuned_scores[best_single]
-    print(f"  Best single: {best_single.upper()} = {best_single_acc:.4f}")
-
-    # ensemble top 3 TUNED models
-    print("\n  -- Phase 4: Ensemble (top 3 tuned) --")
-    top3 = sorted(tuned_scores, key=tuned_scores.get, reverse=True)[:3]
-    print(f"  Members: {[f'{n}({tuned_scores[n]:.4f})' for n in top3]}")
-
-    def ens_fn():
-        parts = []
-        for n in top3:
-            if tuned_params[n]:
-                parts.append((n, make_fn(n, tuned_params[n])()))
-            else:
-                parts.append((n, models[n]()))
-        # weight by CV score so stronger models drive the prediction
-        weights = [tuned_scores[n] for n in top3]
-        return VotingClassifier(estimators=parts, voting='soft', weights=weights)
-
-    ens_m, ens_s = cv_leakfree(ens_fn, df, skf, selected)
-    print(f"  Ensemble: {ens_m:.4f} +/- {ens_s:.4f}")
-
-    use_ens = ens_m > best_single_acc
-    if use_ens:
-        print(f"  -> ENSEMBLE wins (+{ens_m - best_single_acc:.4f} over {best_single.upper()})")
+    # use whichever is better — default or optuna
+    if best_score > default_m:
+        print(f"  Optuna wins (+{best_score - default_m:.4f})")
+        champ_fn = lambda: ExtraTreesClassifier(random_state=42, n_jobs=-1, **best_params)
+        final_score = best_score
     else:
-        print(f"  -> {best_single.upper()} wins (ensemble: {ens_m:.4f} < {best_single_acc:.4f})")
+        print(f"  Default wins ({default_m:.4f} >= {best_score:.4f})")
+        champ_fn = default_fn
+        final_score = default_m
 
-    # threshold tuning on OOF probabilities from the champion model
-    print("\n  -- Phase 5: Threshold tuning --")
-    if use_ens:
-        champ_fn = ens_fn
-    elif tuned_params[best_single]:
-        champ_fn = make_fn(best_single, tuned_params[best_single])
-    else:
-        champ_fn = models[best_single]
-
+    # -- Phase 3: Threshold tuning --
+    print("\n  -- Phase 3: Threshold tuning --")
     _, _, oof_probs, oof_labels = cv_leakfree(champ_fn, df, skf, selected, return_oof=True)
     best_thresh, best_thresh_acc = 0.5, 0.0
-    for t in np.arange(0.3, 0.71, 0.01):
+    for t in np.arange(0.30, 0.71, 0.01):
         acc = accuracy_score(oof_labels, (oof_probs >= t).astype(int))
         if acc > best_thresh_acc:
             best_thresh_acc, best_thresh = acc, t
     print(f"  OOF accuracy at 0.5:  {accuracy_score(oof_labels, (oof_probs >= 0.5).astype(int)):.4f}")
     print(f"  Best threshold: {best_thresh:.2f} -> {best_thresh_acc:.4f}")
 
-    # final training on all data
+    # -- Final --
     print("\n  -- Final --")
     df["label_int"] = ((df["label"] == "True") | (df["label"] == True)).astype(int)
     final = add_prestige(df, df)
@@ -418,14 +334,7 @@ def run_benchmark():
     print(f"  {X_all.shape[1]} features: {list(X_all.columns)}")
     print(f"  threshold: {best_thresh:.2f}")
 
-    if use_ens:
-        print("  using ensemble")
-        champ = ens_fn()
-    elif tuned_params[best_single]:
-        champ = make_fn(best_single, tuned_params[best_single])()
-    else:
-        champ = models[best_single]()
-
+    champ = champ_fn()
     champ.fit(X_all, y_all)
     os.makedirs('/app/output', exist_ok=True)
     joblib.dump(champ, "/app/output/best_model.pkl")
