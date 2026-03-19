@@ -1,4 +1,4 @@
-# IMDB Movie Rating Classifier — Group 13
+# IMDB Movie Rating Classifier - Group 13
 [IMDB Leaderboard](http://big-data-competitions.westeurope.cloudapp.azure.com:8080/competitions/imdb)
 
 ---
