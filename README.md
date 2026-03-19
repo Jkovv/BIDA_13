@@ -74,5 +74,3 @@ The following were analyzed but correctly rejected by our statistical pipeline:
     docker compose up
     ```
 4.  **Outputs:** Predictions are saved to `/app/output/validation.txt` and `/app/output/test.txt`.
-
-[Submission server](http://big-data-competitions.westeurope.cloudapp.azure.com:8080/)
