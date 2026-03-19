@@ -10,7 +10,7 @@ OSCAR_PATH = "/app/imdb/the_oscar_award.csv"
 def load_oscar_features(train_tconsts):
     df = pd.read_csv(OSCAR_PATH)
 
-    # normalize columns — dataset has slight variations depending on version
+    # normalize columns - dataset has slight variations depending on version
     df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
 
     # winner column is True/False or 1/0 depending on version
@@ -25,7 +25,7 @@ def load_oscar_features(train_tconsts):
     id_col = "tconst" if "tconst" in df.columns else ("imdb_id" if "imdb_id" in df.columns else None)
 
     if id_col:
-        # clean up the id — sometimes stored as tt1234567, sometimes as 1234567
+        # clean up the id - sometimes stored as tt1234567, sometimes as 1234567
         df[id_col] = df[id_col].astype(str).str.strip()
         df[id_col] = df[id_col].apply(
             lambda x: f"tt{int(x):07d}" if x.isdigit() else x
@@ -37,7 +37,7 @@ def load_oscar_features(train_tconsts):
         agg = agg.rename(columns={id_col: "tconst"})
         print(f"  Oscar data: {len(agg)} films with tconst, joining directly")
     else:
-        # no tconst column — fall back to title+year join
+        # no tconst column - fall back to title+year join
         # less reliable but still catches most films
         if "film" not in df.columns:
             print("  Warning: unexpected Oscar CSV format, skipping")

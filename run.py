@@ -18,7 +18,7 @@ from catboost import CatBoostClassifier
 import optuna
 
 
-# -- prestige (recomputed per CV fold) --
+# prestige (recomputed per CV fold)
 
 DIRECTING, WRITING, DIR_COUNT, WRI_COUNT = None, None, None, None
 
@@ -74,8 +74,7 @@ def add_prestige(train_df, target_df):
     return out
 
 
-# -- statistical feature selection --
-
+# statistical feature selection
 def _bh_correction(pvals, alpha):
     n = len(pvals)
     idx = np.argsort(pvals)
@@ -185,7 +184,7 @@ def select_features(X, y, cols, n_perms=100, mw_alpha=0.05, mi_alpha=0.1, corr_t
     return candidates
 
 
-# -- prepare --
+# prepare
 
 def prepare(df, selected=None):
     num = ["runtime", "log_votes", "film_age", "vote_density", "votes_per_minute",
@@ -211,7 +210,7 @@ def prepare(df, selected=None):
     return X.astype(np.float64), y
 
 
-# -- leak-free CV --
+# leak-free CV
 
 def cv_leakfree(clf_fn, df, skf, selected=None, return_oof=False):
     y_all = LabelEncoder().fit_transform(df["label"].astype(str))
@@ -239,8 +238,7 @@ def cv_leakfree(clf_fn, df, skf, selected=None, return_oof=False):
     return np.mean(accs), np.std(accs)
 
 
-# -- main --
-
+# main
 def run_benchmark():
     print("Step 6: Training")
 
@@ -262,7 +260,7 @@ def run_benchmark():
 
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-    # all models listed for reference, only ET is active
+    # all models listed for reference, only ET is active because it was the best in preliminary tests and we want to save time — feel free to experiment with others!
     models = {
         # 'xgb':  lambda: XGBClassifier(n_estimators=300, max_depth=4, learning_rate=0.05,
         #                                random_state=42, eval_metric='logloss'),
@@ -274,13 +272,13 @@ def run_benchmark():
         'et':   lambda: ExtraTreesClassifier(n_estimators=500, max_depth=16, random_state=42, n_jobs=-1),
     }
 
-    print("\n  -- Phase 1: ET default --")
+    print("\n  Phase 1: ET default")
     default_fn = models['et']
     default_m, default_s = cv_leakfree(default_fn, df, skf, selected)
     print(f"  et   : {default_m:.4f} +/- {default_s:.4f}")
 
-    # -- Phase 2: Optuna tuning --
-    print("\n  -- Phase 2: Optuna ET tuning (80 trials) --")
+    # Phase 2: Optuna tuning --
+    print("\n  Phase 2: Optuna ET tuning (80 trials)")
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
     def objective(trial):
@@ -314,19 +312,19 @@ def run_benchmark():
         champ_fn = default_fn
         final_score = default_m
 
-    # -- Phase 3: Threshold tuning --
-    print("\n  -- Phase 3: Threshold tuning --")
+    # Phase 3: Threshold tuning 
+    print("\n  Phase 3: Threshold tuning")
     _, _, oof_probs, oof_labels = cv_leakfree(champ_fn, df, skf, selected, return_oof=True)
     best_thresh, best_thresh_acc = 0.5, 0.0
     for t in np.arange(0.30, 0.71, 0.01):
         acc = accuracy_score(oof_labels, (oof_probs >= t).astype(int))
         if acc > best_thresh_acc:
             best_thresh_acc, best_thresh = acc, t
-    print(f"  OOF accuracy at 0.5:  {accuracy_score(oof_labels, (oof_probs >= 0.5).astype(int)):.4f}")
-    print(f"  Best threshold: {best_thresh:.2f} -> {best_thresh_acc:.4f}")
+    print(f"OOF accuracy at 0.5:  {accuracy_score(oof_labels, (oof_probs >= 0.5).astype(int)):.4f}")
+    print(f"Best threshold: {best_thresh:.2f} -> {best_thresh_acc:.4f}")
 
-    # -- Final --
-    print("\n  -- Final --")
+    # Final
+    print("\nFinal")
     df["label_int"] = ((df["label"] == "True") | (df["label"] == True)).astype(int)
     final = add_prestige(df, df)
     final = final.drop(columns=["label_int"], errors="ignore")

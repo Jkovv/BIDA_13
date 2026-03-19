@@ -5,15 +5,13 @@ import json
 import pandas as pd
 import numpy as np
 
-# ---- MovieLens 25M (GroupLens, University of Minnesota) ----
-# different source/userbase from IMDB — allowed as external data
+# MovieLens 25M (GroupLens, University of Minnesota) 
 ML_URL = "https://files.grouplens.org/datasets/movielens/ml-25m.zip"
 ML_ZIP = "/app/imdb/ml-25m.zip"
 ML_DIR = "/app/imdb/ml-25m"
 
 # hand-picked MovieLens tag relevance features
 # MovieLens assigns continuous [0,1] relevance scores per movie for ~1000
-# user-generated tags. we pick ones relevant to quality/reception.
 MOVIELENS_TAGS = [
     "thought-provoking", "masterpiece", "atmospheric", "cult film",
     "visually appealing", "feel-good", "boring", "predictable",
@@ -22,36 +20,7 @@ MOVIELENS_TAGS = [
     "cinematography", "surreal", "inspiring", "dialogue",
 ]
 
-# -- keep this block, used for poster presentation --
-# tried replacing the hand-picked list above with correlation-based selection
-# across all ~1128 MovieLens tag relevance scores. point-biserial correlation
-# against training labels, top 50 by |r|. same validation accuracy (0.8859)
-# but more principled. reverted because test prediction distribution shifted
-# and hand-picked is safer.
-#
-# from scipy import stats
-# N_SELECTED_TAGS = 50
-#
-# def select_tags_by_correlation(train_tconsts_labels, links, top_n=N_SELECTED_TAGS):
-#     scores = pd.read_csv(os.path.join(ML_DIR, "genome-scores.csv"))
-#     tags = pd.read_csv(os.path.join(ML_DIR, "genome-tags.csv"))
-#     scores = scores.merge(links[["movieId", "tconst"]], on="movieId", how="inner")
-#     pivoted = scores.pivot_table(index="tconst", columns="tagId", values="relevance", aggfunc="first")
-#     train_data = train_tconsts_labels.join(pivoted, how="inner")
-#     y = train_data["label_int"].values
-#     correlations = {}
-#     for tag_id in [c for c in train_data.columns if c != "label_int"]:
-#         x = train_data[tag_id].values
-#         if x.std() > 0:
-#             r, _ = stats.pointbiserialr(y, x)
-#             correlations[tag_id] = abs(r)
-#     top_tag_ids = sorted(correlations, key=correlations.get, reverse=True)[:top_n]
-#     tag_name_map = tags.set_index("tagId")["tag"].to_dict()
-#     selected = [(tid, tag_name_map[tid]) for tid in top_tag_ids if tid in tag_name_map]
-#     return selected
-# --
-
-# ---- Bechdel Test (bechdeltest.com) ----
+# Bechdel 
 # measures female representation in fiction (score 0-3)
 # independent of IMDB, joinable via imdb_id
 BECHDEL_URL = "https://bechdeltest.com/api/v1/getAllMovies"
@@ -256,12 +225,6 @@ def run():
         df.to_parquet(path, index=False)
         print(f"  {name}: ML={ml_matched}/{before}, Bechdel={bechdel_matched}/{before}")
 
-    # failed enrichments documented for poster:
-    # - Oscar awards: 11% match, failed MW+MI tests (awards.py)
-    # - TSPDT 1000: 2.6% match, same (prestige_lists.py)
-    # - Criterion: 3.4% match, same (prestige_lists.py)
-    # - Director-DP loyalty: 10% match, failed MI (loyalty.py)
-    # - TMDB budget/revenue/popularity/language: 31% missing budget, all failed permutation MI
     print()
 
 

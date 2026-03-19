@@ -16,9 +16,6 @@ def clean_txt(text):
 def process_split(con, table_name, has_label):
     label_select = ", label" if has_label else ""
 
-    # DuckDB does the heavy lifting: type casting, null handling, winsorization, imputation
-    # We chose DuckDB here because these are all standard analytical SQL operations
-    # and it handles the CSV glob + window functions much faster than pandas
     con.execute(f"""
         CREATE OR REPLACE TABLE {table_name}_typed AS
         SELECT
