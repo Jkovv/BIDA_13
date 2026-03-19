@@ -21,7 +21,7 @@ The pipeline is distributed across specialized modules to ensure efficiency and 
 
 ---
 
-### 2. Feature Selection: Statistical Gatekeeping
+### 2. Feature Selection
 
 To prevent overfitting on an 8k movie dataset, all features must pass a rigorous nonparametric selection process in `run.py`:
 
