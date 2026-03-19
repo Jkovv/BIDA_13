@@ -138,7 +138,7 @@ We ran a lot of experiments. Here's everything that didn't make the final pipeli
 
 **TF-IDF title features**: 49/50 dimensions failed permutation MI across multiple runs. Movie titles are 2-4 words - there just isn't enough text for meaningful signal. The extraction is correct now (it was broken earlier, never reaching the model), but the features themselves are noise.
 
-**Correlation-based tag selection** (commented out in `enrich.py`): instead of hand-picking 19 tags, we took the top 50 by point-biserial correlation with training labels. Same 88.59% server score — kept as a reference implementation.
+**Correlation-based tag selection** (commented out in `enrich.py`): instead of hand-picking 19 tags, we took the top 50 by point-biserial correlation with training labels. Same 88.59% server score - kept as a reference implementation.
 
 All failed experiments are documented in the repo with comments explaining why the statistical pipeline rejected them.
 
