@@ -1,7 +1,7 @@
 # IMDB Movie Rating Classifier - Group 13
 [IMDB Leaderboard](http://big-data-competitions.westeurope.cloudapp.azure.com:8080/competitions/imdb)
 
-# IMDB Movie Rating Classifier - Group 13
+--- 
 
 This project implements a high-performance binary classification pipeline to predict whether a movie is "high-rated" on IMDB. By combining raw IMDB data with extensive external features from MovieLens 25M and the Bechdel Test, the system achieves a state-of-the-art balance between complexity and statistical rigor.
 
