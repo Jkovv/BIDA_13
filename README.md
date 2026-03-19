@@ -58,7 +58,7 @@ The current "Champion" model is an **ExtraTreesClassifier**. Its use of random s
 ### 5. Failed Enrichments (Analysis)
 
 The following were analyzed but correctly rejected by our statistical pipeline:
-* [cite_start]**Oscar Awards & Prestige Lists (TSPDT/Criterion):** Strong signals but low coverage (2-11% match); failed permutation MI tests[cite: 1].
+* **Oscar Awards & Prestige Lists (TSPDT/Criterion):** Strong signals but low coverage (2-11% match); failed permutation MI tests.
 * **Director-DP Loyalty:** Signal existed for elite pairings, but insufficient training examples to generalize.
 * **TMDB Metadata:** High percentage of missing budget data (~31%); failed MI gatekeeping.
 * **Graph PageRank:** Highly redundant with existing Bayesian prestige scores ($\rho > 0.85$).
