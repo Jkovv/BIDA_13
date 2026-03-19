@@ -41,7 +41,7 @@ To prevent overfitting on an 8k movie dataset, all features must pass a rigorous
 | 88.6% | MovieLens Tag Genome (19 hand-picked tags) | 88.59% |
 | 89.1% | ExtraTrees (ET) + Fixed TF-IDF Extraction | 91.10% |
 | 89.37% | ET + Threshold Tuning (0.46) | 91.31% |
-| **0.8984** | **Final: Optuna Optimized ET (500 est, depth 16) + 60 Features** | 91.31% |
+| **89.84%** | **Final: Optuna Optimized ET (500 est, depth 16) + 60 Features** | 91.31% |
 
 ---
 
