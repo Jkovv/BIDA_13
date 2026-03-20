@@ -44,7 +44,7 @@ The raw training data has every movie duplicated 3x across the CSV files — we 
 
 ### 3. External Data Enrichment (enrich.py)
 
-We enrich every movie with features from **MovieLens 25M** (GroupLens, University of Minnesota) — this is NOT IMDB data, it's a completely separate user base with independent ratings.
+We enrich every movie with features from **MovieLens 25M** (GroupLens, University of Minnesota) - this is NOT IMDB data, it's a completely separate user base with independent ratings.
 
 **What we extract:**
 * **Rating aggregates:** mean, std, median, count, log_count, tag_count - captures both quality and popularity from a different audience than IMDB.
@@ -58,7 +58,7 @@ We also attempt to download **Bechdel Test** scores from bechdeltest.com (female
 
 ### 4. Feature Selection (run.py)
 
-With ~70 candidate features on only 8k movies, aggressive selection is essential. We use a 4-stage nonparametric pipeline — no normality assumptions anywhere:
+With ~70 candidate features on only 8k movies, aggressive selection is essential. We use a 4-stage nonparametric pipeline - no normality assumptions anywhere:
 
 1. **Mann-Whitney U + Benjamini-Hochberg** (FDR α=0.05) - tests whether feature distributions differ between True/False classes. BH correction prevents false discoveries across 70+ simultaneous tests.
 
@@ -126,7 +126,7 @@ We ran a lot of experiments. Here's everything that didn't make the final pipeli
 
 **Director-DP Loyalty** (`loyalty.py`): built from TMDB credits. Counted prior collaborations between a director and their cinematographer. The Scorsese–Ballhaus type signal is real, but only 10% of movies had prior collaborations. Failed MI.
 
-**PageRank on Director-Writer Graph**: bipartite graph from directing.json + writing.json, computed PageRank centrality per person. The resulting features correlated ρ > 0.85 with Bayesian prestige — both just capture "this person is associated with good movies." Pruned in the redundancy step.
+**PageRank on Director-Writer Graph**: bipartite graph from directing.json + writing.json, computed PageRank centrality per person. The resulting features correlated ρ > 0.85 with Bayesian prestige - both just capture "this person is associated with good movies." Pruned in the redundancy step.
 
 **NMF instead of PCA** (60 components): Non-Negative Matrix Factorization on the tag genome. Theoretically better for non-negative [0,1] data, but performed worse on the server. PCA's orthogonal components work better with ExtraTrees.
 
