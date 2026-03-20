@@ -5,13 +5,14 @@ import json
 import pandas as pd
 import numpy as np
 
-# MovieLens 25M (GroupLens, University of Minnesota) 
+# movielens
 ML_URL = "https://files.grouplens.org/datasets/movielens/ml-25m.zip"
 ML_ZIP = "/app/imdb/ml-25m.zip"
 ML_DIR = "/app/imdb/ml-25m"
 
 # hand-picked MovieLens tag relevance features
 # MovieLens assigns continuous [0,1] relevance scores per movie for ~1000
+# user-generated tags. we pick ones relevant to quality/reception.
 MOVIELENS_TAGS = [
     "thought-provoking", "masterpiece", "atmospheric", "cult film",
     "visually appealing", "feel-good", "boring", "predictable",
@@ -20,7 +21,29 @@ MOVIELENS_TAGS = [
     "cinematography", "surreal", "inspiring", "dialogue",
 ]
 
-# Bechdel 
+# from scipy import stats
+# N_SELECTED_TAGS = 50
+#
+# def select_tags_by_correlation(train_tconsts_labels, links, top_n=N_SELECTED_TAGS):
+#     scores = pd.read_csv(os.path.join(ML_DIR, "genome-scores.csv"))
+#     tags = pd.read_csv(os.path.join(ML_DIR, "genome-tags.csv"))
+#     scores = scores.merge(links[["movieId", "tconst"]], on="movieId", how="inner")
+#     pivoted = scores.pivot_table(index="tconst", columns="tagId", values="relevance", aggfunc="first")
+#     train_data = train_tconsts_labels.join(pivoted, how="inner")
+#     y = train_data["label_int"].values
+#     correlations = {}
+#     for tag_id in [c for c in train_data.columns if c != "label_int"]:
+#         x = train_data[tag_id].values
+#         if x.std() > 0:
+#             r, _ = stats.pointbiserialr(y, x)
+#             correlations[tag_id] = abs(r)
+#     top_tag_ids = sorted(correlations, key=correlations.get, reverse=True)[:top_n]
+#     tag_name_map = tags.set_index("tagId")["tag"].to_dict()
+#     selected = [(tid, tag_name_map[tid]) for tid in top_tag_ids if tid in tag_name_map]
+#     return selected
+# --
+
+# Bechdel Test (bechdeltest.com) 
 # measures female representation in fiction (score 0-3)
 # independent of IMDB, joinable via imdb_id
 BECHDEL_URL = "https://bechdeltest.com/api/v1/getAllMovies"
@@ -176,6 +199,38 @@ def load_bechdel_features():
     return df[["tconst", "bechdel_score", "bechdel_pass"]].drop_duplicates(subset=["tconst"])
 
 
+# TMDB community ratings — different user base from both IMDB and MovieLens
+TMDB_PATH = "/app/imdb/tmdb_metadata.csv"
+
+def load_tmdb_ratings():
+    """extract just vote_average and vote_count from TMDB metadata.
+    NOT budget/revenue (those failed MI due to 31% missing). the ratings
+    have much better coverage."""
+    if not os.path.exists(TMDB_PATH):
+        print("  tmdb_metadata.csv not found, skipping TMDB ratings")
+        return None
+
+    df = pd.read_csv(TMDB_PATH, low_memory=False)
+    if "imdb_id" not in df.columns:
+        print("  TMDB CSV missing imdb_id, skipping")
+        return None
+
+    df["tconst"] = df["imdb_id"].astype(str).str.strip()
+    df["tmdb_vote_avg"] = pd.to_numeric(df.get("vote_average"), errors="coerce")
+    df["tmdb_vote_count"] = pd.to_numeric(df.get("vote_count"), errors="coerce")
+    df["tmdb_log_votes"] = np.log1p(df["tmdb_vote_count"])
+
+    # drop movies with no ratings at all (vote_count == 0 or NaN)
+    # these would get median-imputed anyway but keeping them as NaN
+    # lets the join handle it cleanly
+    df.loc[df["tmdb_vote_count"] < 1, ["tmdb_vote_avg", "tmdb_vote_count", "tmdb_log_votes"]] = np.nan
+
+    out = df[["tconst", "tmdb_vote_avg", "tmdb_vote_count", "tmdb_log_votes"]].drop_duplicates(subset=["tconst"])
+    has_ratings = out["tmdb_vote_avg"].notna().sum()
+    print(f"  TMDB ratings: {has_ratings}/{len(out)} movies with votes")
+    return out
+
+
 def run():
     if not os.path.exists("/app/processed/train.parquet"):
         return
@@ -189,6 +244,9 @@ def run():
 
     # Bechdel
     bechdel_features = load_bechdel_features()
+
+    # TMDB ratings (not budget/revenue — those failed)
+    tmdb_features = load_tmdb_ratings()
 
     for name in ["train", "validation_hidden", "test_hidden"]:
         path = f"/app/processed/{name}.parquet"
@@ -222,9 +280,27 @@ def run():
             df["bechdel_pass"] = df["bechdel_pass"].fillna(0).astype(int)
             bechdel_matched = (df["bechdel_score"] > 0).sum()
 
-        df.to_parquet(path, index=False)
-        print(f"  {name}: ML={ml_matched}/{before}, Bechdel={bechdel_matched}/{before}")
+        # TMDB ratings - median imputation for missing (NOT zero-fill)
+        tmdb_matched = 0
+        if tmdb_features is not None:
+            tmdb_cols = ["tmdb_vote_avg", "tmdb_vote_count", "tmdb_log_votes"]
+            df = df.drop(columns=[c for c in tmdb_cols if c in df.columns], errors="ignore")
+            df = df.merge(tmdb_features, on="tconst", how="left")
+            for col in tmdb_cols:
+                df[col] = df[col].fillna(df[col].median())
+            tmdb_matched = (df["tmdb_vote_count"] > 0).sum()
 
+        df.to_parquet(path, index=False)
+        print(f"  {name}: ML={ml_matched}/{before}, Bechdel={bechdel_matched}/{before}"
+              f", TMDB={tmdb_matched}/{before}")
+
+    # failed enrichments documented for poster:
+    # - Oscar awards: 11% match, failed MW+MI tests (awards.py)
+    # - TSPDT 1000: 2.6% match, same (prestige_lists.py)
+    # - Criterion: 3.4% match, same (prestige_lists.py)
+    # - Director-DP loyalty: 10% match, failed MI (loyalty.py)
+    # - TMDB budget/revenue/popularity/language: 31% missing budget, all failed permutation MI
+    # - TMDB vote_average/vote_count: tested separately (different coverage than budget)
     print()
 
 
