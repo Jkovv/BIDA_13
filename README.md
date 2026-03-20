@@ -5,7 +5,7 @@
 
 Binary classification pipeline to predict whether a movie is "high-rated" on IMDB. We combine raw IMDB metadata with external features from MovieLens 25M, run everything through a nonparametric statistical gatekeeping pipeline, and let an ExtraTrees model do the rest.
 
-**Final Local CV: 89.84%** | **Best Server Accuracy: 91.31%**
+**Final Local CV: 90.84%** | **Best Server Accuracy: 92.98%**
 
 ---
 
@@ -42,17 +42,18 @@ The raw training data has every movie duplicated 3x across the CSV files — we 
 
 ---
 
-### 3. External Data Enrichment (enrich.py)
+### 3. External Data Enrichment
 
-We enrich every movie with features from **MovieLens 25M** (GroupLens, University of Minnesota) - this is NOT IMDB data, it's a completely separate user base with independent ratings.
+We enrich every movie with features from **MovieLens 25M** (GroupLens, University of Minnesota) and **TMDB** — these provide independent community signals from user bases completely separate from IMDB.
 
 **What we extract:**
 * **Rating aggregates:** mean, std, median, count, log_count, tag_count - captures both quality and popularity from a different audience than IMDB.
-* **19 genre flags** from MovieLens genre tags (Drama, Comedy, Horror, etc.) plus a genre_count feature.
-* **19 hand-picked tag relevance scores:** MovieLens assigns continuous [0,1] relevance to ~1,128 user-generated tags per movie. We pick tags relevant to quality perception: `boring`, `predictable`, `masterpiece`, `atmospheric`, `cinematography`, `thought-provoking`, etc. These turned out to be the single biggest accuracy boost (+9%).
+* **TMDB community ratings:** `tmdb_vote_avg` and `tmdb_vote_count`. The average rating emerged as a "heavy hitter" (effect size $r = 0.79$), providing critical third-party validation of film quality.
+* **19 genre flags** from MovieLens genre tags (Drama, Comedy, Horror, etc.) plus a `genre_count` feature.
+* **19 hand-picked tag relevance scores:** MovieLens assigns continuous [0,1] relevance to ~1,128 user-generated tags per movie. We pick tags relevant to quality perception: `boring`, `predictable`, `masterpiece`, `atmospheric`, `cinematography`, `thought-provoking`, etc. These turned out to be the single biggest accuracy boost (**+9%**).
 * **30 PCA components** on the full 1,128-tag matrix: captures cross-tag patterns that no individual tag captures alone. `mltag_pc_0` had MI=0.177, as strong as `mltag_boring`.
 
-We also attempt to download **Bechdel Test** scores from bechdeltest.com (female representation, score 0-3), but the API has been returning 410 Gone throughout the project period.
+We also attempt to download **Bechdel Test** scores from bechdeltest.com (female representation, score 0-3), but the API has been returning **410 Gone** throughout the project period.
 
 ---
 
@@ -107,6 +108,7 @@ We tested six models across many runs: XGBoost, LightGBM, CatBoost, Random Fores
 | 89.1% | 91.10% | Switched from Random Forest to ExtraTrees |
 | 89.37% | 91.31% | Threshold tuning on OOF probabilities (0.46 instead of 0.5) |
 | **89.84%** | **91.31%** | Optuna-tuned ET (80 trials), 60 features |
+| **90.84%** | **92.98%** | Optuna-tuned ET (80 trials), 60 features |
 
 Local CV is consistently ~2% below the server score because the final model trains on 100% of the data.
 
