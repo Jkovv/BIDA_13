@@ -19,7 +19,6 @@ import optuna
 
 
 # prestige (recomputed per CV fold)
-
 DIRECTING, WRITING, DIR_COUNT, WRI_COUNT = None, None, None, None
 
 def _init_crew():
@@ -185,7 +184,6 @@ def select_features(X, y, cols, n_perms=100, mw_alpha=0.05, mi_alpha=0.1, corr_t
 
 
 # prepare
-
 def prepare(df, selected=None):
     num = ["runtime", "log_votes", "film_age", "vote_density", "votes_per_minute",
            "runtime_short", "runtime_long", "votes_x_runtime", "is_foreign",
@@ -211,7 +209,6 @@ def prepare(df, selected=None):
 
 
 # leak-free CV
-
 def cv_leakfree(clf_fn, df, skf, selected=None, return_oof=False):
     y_all = LabelEncoder().fit_transform(df["label"].astype(str))
     accs = []
