@@ -17,12 +17,7 @@ from lightgbm import LGBMClassifier
 from catboost import CatBoostClassifier
 import optuna
 
-<<<<<<< HEAD
-# prestige scores - recomputed per CV fold to avoid label leak
-=======
-
-# prestige (recomputed per CV fold)
->>>>>>> 8f39820bf87d8752863d0cf0bb6e875cc9516bdf
+# prestige scores — recomputed per CV fold to avoid label leak
 DIRECTING, WRITING, DIR_COUNT, WRI_COUNT = None, None, None, None
 
 def _init_crew():
@@ -119,7 +114,7 @@ def select_features(X, y, cols, n_perms=100, mw_alpha=0.05, mi_alpha=0.1, corr_t
     data = X.copy()
     data['label_int'] = y
 
-    # stage 1: mann-whitney
+    # stage 1: mann-whitney 
     print("\n  1) Mann-Whitney U + BH (alpha=0.05)")
     mw_pvals, mw_effects = [], []
     for c in cols:
@@ -157,8 +152,7 @@ def select_features(X, y, cols, n_perms=100, mw_alpha=0.05, mi_alpha=0.1, corr_t
         print(f"\n  Dropped (failed tests): {dropped}")
     print(f"  Passed: {candidates}")
 
-    # stage 3: partial spearman for interaction features 
-    # these are the features we know are derived from other features
+    # stage 3: partial spearman for interaction features ---
     interaction_tests = [
         ('votes_x_runtime', ['log_votes', 'runtime']),
         ('vote_density', ['log_votes', 'film_age']),
@@ -172,6 +166,7 @@ def select_features(X, y, cols, n_perms=100, mw_alpha=0.05, mi_alpha=0.1, corr_t
         ('bechdel_pass', ['bechdel_score']),
         ('ml_log_count', ['ml_rating_count']),
         ('tmdb_log_votes', ['tmdb_vote_count']),
+        ('lb_log_count', ['lb_rating_count']),
     ]
 
     partial_drops = set()
@@ -210,12 +205,7 @@ def select_features(X, y, cols, n_perms=100, mw_alpha=0.05, mi_alpha=0.1, corr_t
     print(f"\n  SELECTED: {candidates} ({len(candidates)} features)")
     return candidates
 
-<<<<<<< HEAD
 # prepare features + leak-free CV
-=======
-
-# prepare
->>>>>>> 8f39820bf87d8752863d0cf0bb6e875cc9516bdf
 def prepare(df, selected=None):
     num = ["runtime", "log_votes", "film_age", "vote_density", "votes_per_minute",
            "runtime_short", "runtime_long", "votes_x_runtime", "is_foreign",
@@ -224,6 +214,8 @@ def prepare(df, selected=None):
            "ml_rating_median", "ml_log_count", "ml_tag_count",
            # tmdb community ratings (separate from MovieLens)
            "tmdb_vote_avg", "tmdb_vote_count", "tmdb_log_votes",
+           # letterboxd community ratings (cinephile audience)
+           "lb_rating_mean", "lb_rating_count", "lb_rating_std", "lb_log_count",
            "bechdel_score", "bechdel_pass"]
     genre = [c for c in df.columns if c.startswith("genre_")]
     mltag = [c for c in df.columns if c.startswith("mltag_")]
@@ -242,10 +234,6 @@ def prepare(df, selected=None):
     return X.astype(np.float64), y
 
 
-<<<<<<< HEAD
-=======
-# leak-free CV
->>>>>>> 8f39820bf87d8752863d0cf0bb6e875cc9516bdf
 def cv_leakfree(clf_fn, df, skf, selected=None, return_oof=False):
     """5-fold CV with prestige recomputed per fold so val labels never
     leak into the prestige features."""
@@ -313,15 +301,15 @@ def run_benchmark():
         'et': lambda: ExtraTreesClassifier(n_estimators=500, max_depth=16, random_state=42, n_jobs=-1),
     }
 
-    # default score
-    print("\nET default")
+    # default score 
+    print("\n  -- ET default --")
     default_m, default_s = cv_leakfree(models['et'], df, skf, selected)
-    print(f"et: {default_m:.4f} +/- {default_s:.4f}")
+    print(f"  et: {default_m:.4f} +/- {default_s:.4f}")
 
     # optuna tuning 
     # TPE sampler learns which regions of the hyperparameter space work best
     # and focuses there, unlike random search which is blind
-    print("\n Optuna tuning (80 trials)")
+    print("\n  -- Optuna tuning (80 trials) --")
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
     def objective(trial):
@@ -353,10 +341,10 @@ def run_benchmark():
         print(f"  -> default wins ({default_m:.4f} >= {best_score:.4f})")
         champ_fn = models['et']
 
-    # threshold tuning 
+    # threshold tuning
     # ET's default 0.5 threshold is slightly conservative. sweeping OOF
     # probabilities usually finds something around 0.44-0.48 that works better.
-    print("\n Threshold tuning")
+    print("\n  -- Threshold tuning --")
     _, _, oof_probs, oof_labels = cv_leakfree(champ_fn, df, skf, selected, return_oof=True)
 
     best_thresh, best_thresh_acc = 0.5, 0.0
@@ -369,8 +357,8 @@ def run_benchmark():
     print(f"  at 0.5: {oof_default:.4f}")
     print(f"  best:   {best_thresh:.2f} -> {best_thresh_acc:.4f}")
 
-    # final model on ALL training data
-    print("\n  Final model")
+    # final model on ALL training data 
+    print("\n  -- Final model --")
     df["label_int"] = ((df["label"] == "True") | (df["label"] == True)).astype(int)
     final = add_prestige(df, df)
     final = final.drop(columns=["label_int"], errors="ignore")
@@ -382,7 +370,7 @@ def run_benchmark():
     os.makedirs('/app/output', exist_ok=True)
     joblib.dump(champ, "/app/output/best_model.pkl")
 
-    # predictions
+    # predictions 
     for split in ["validation", "test"]:
         csv_path = f"/app/imdb/{split}_hidden.csv"
         fp = f"/app/processed/{split}_hidden_features.parquet"
