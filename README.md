@@ -12,7 +12,7 @@ Binary classification pipeline to predict whether a movie is "high-rated" on IMD
 ### 1. Pipeline Architecture
 
 ```
-cleaning.py     DuckDB    CSV ingestion, dedup, unicode fix, winsorization, imputation
+cleaning.py     DuckDB    CSV ingestion, deduplication, unicode fix, winsorization, imputation
 prestige.py     Pandas    Bayesian prestige scores for directors/writers (k=20)
 enrich.py       Pandas    MovieLens 25M: ratings, genres, 19 tag scores + 30 PCA components
 features.py     PySpark   TF-IDF on movie titles, extracts top 50 dimensions
