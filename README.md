@@ -5,7 +5,7 @@
 
 Binary classification pipeline to predict whether a movie is "high-rated" on IMDB. We combine raw IMDB metadata with external features from MovieLens 25M, run everything through a nonparametric statistical gatekeeping pipeline, and let an ExtraTrees model do the rest.
 
-**Final Local CV: 90.84%** | **Best Server Accuracy: 92.98%**
+**Final Local CV: 90.99%** | **Best Server Accuracy: 92.98%**
 
 ---
 
@@ -108,7 +108,7 @@ We tested six models across many runs: XGBoost, LightGBM, CatBoost, Random Fores
 | 89.1% | 91.10% | Switched from Random Forest to ExtraTrees |
 | 89.37% | 91.31% | Threshold tuning on OOF probabilities (0.46 instead of 0.5) |
 | **89.84%** | **91.31%** | Optuna-tuned ET (80 trials), 60 features |
-| **90.84%** | **92.98%** | Optuna-tuned ET (80 trials), 60 features |
+| **90.99%** | **92.98%** | Optuna-tuned ET (80 trials), 60 features |
 
 Local CV is consistently ~2% below the server score because the final model trains on 100% of the data.
 
